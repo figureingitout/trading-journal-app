@@ -6,6 +6,7 @@ import re
 import calendar
 import yfinance as yf
 import plotly.graph_objects as go
+from zoneinfo import ZoneInfo
 from supabase import create_client
 
 st.set_page_config(page_title="Trading Journal", layout="wide")
@@ -42,8 +43,14 @@ def ensure_session_state():
         "refresh_token": None,
         "ai_history": [],
         "user_api_key": "",
-        "refresh_market": False,
-        "benchmark_mode": "Futures"
+        "benchmark_mode": "Futures",
+        "chart_size": "Sparkline",
+        "clock_mode": "Local",
+        "show_calendar_benchmark": True,
+        "account_size_default": 25000.0,
+        "default_asset_type": "Stocks",
+        "default_trade_side": "Long",
+        "theme_mode": "Auto"
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -112,7 +119,6 @@ def sign_out_user():
     st.session_state.refresh_token = None
     st.session_state.ai_history = []
     st.session_state.user_api_key = ""
-    st.session_state.refresh_market = False
 
 
 def save_profile_if_needed(user_id: str, email: str, username: str):
@@ -165,7 +171,7 @@ def delete_strategy(strategy_id):
     )
 
 
-def log_trade(user_id, date, entry_time, exit_time, ticker, side, qty, entry, exitp, strategy, followed_plan, notes):
+def log_trade(user_id, date, entry_time, exit_time, ticker, side, qty, entry, exitp, strategy, followed_plan, notes, asset_type):
     pnl = (exitp - entry) * qty if side == "Long" else (entry - exitp) * qty
     percent_gain = compute_percent_gain(side, entry, exitp)
 
@@ -175,7 +181,7 @@ def log_trade(user_id, date, entry_time, exit_time, ticker, side, qty, entry, ex
         "entry_time": entry_time,
         "exit_time": exit_time,
         "symbol": ticker,
-        "asset_type": "",
+        "asset_type": asset_type,
         "side": side.lower(),
         "quantity": qty,
         "entry_price": entry,
@@ -192,7 +198,7 @@ def log_trade(user_id, date, entry_time, exit_time, ticker, side, qty, entry, ex
 def get_trades_df(user_id):
     response = (
         supabase.table("trades")
-        .select("id,trade_date,entry_time,exit_time,symbol,side,quantity,entry_price,exit_price,pnl,percent_gain,followed_plan,notes")
+        .select("id,trade_date,entry_time,exit_time,symbol,asset_type,side,quantity,entry_price,exit_price,pnl,percent_gain,followed_plan,notes")
         .eq("user_id", user_id)
         .order("trade_date", desc=True)
         .order("entry_time", desc=True)
@@ -286,14 +292,21 @@ def fetch_intraday(symbol, period="10d", interval="30m"):
         hist = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False)
         if hist is None or hist.empty:
             return pd.DataFrame()
-        df = hist[["Close"]].copy()
-        return df
+        return hist[["Close"]].copy()
     except Exception:
         return pd.DataFrame()
 
 
+def get_chart_dimensions():
+    if st.session_state.chart_size == "Sparkline":
+        return {"height": 60, "width_col_ratio": [1.4, 0.8, 6.8]}
+    return {"height": 95, "width_col_ratio": [1.4, 1.2, 5.8]}
+
+
 def render_quote_and_chart_row(symbol, quote_data, intraday_df):
-    col_price, col_chart = st.columns([1, 2])
+    dims = get_chart_dimensions()
+    col_price, col_chart, col_empty = st.columns(dims["width_col_ratio"])
+
     with col_price:
         if quote_data["price"] is None:
             st.metric(symbol, "N/A", "Unavailable")
@@ -307,23 +320,48 @@ def render_quote_and_chart_row(symbol, quote_data, intraday_df):
 
     with col_chart:
         if intraday_df.empty:
-            st.info(f"No intraday data for {symbol}.")
+            st.caption("No chart data")
         else:
             fig = go.Figure()
+            line_color = "#22c55e" if intraday_df["Close"].iloc[-1] >= intraday_df["Close"].iloc[0] else "#ef4444"
             fig.add_trace(go.Scatter(
                 x=intraday_df.index,
                 y=intraday_df["Close"],
                 mode="lines",
-                name=f"{symbol}",
-                line=dict(color="white", width=1.5)
+                line=dict(color=line_color, width=1.6),
+                hoverinfo="skip"
             ))
             fig.update_layout(
-                margin=dict(l=10, r=10, t=10, b=10),
+                margin=dict(l=0, r=0, t=0, b=0),
+                height=dims["height"],
                 template="plotly_dark",
-                height=140,
-                showlegend=False
+                showlegend=False,
+                xaxis=dict(visible=False, fixedrange=True),
+                yaxis=dict(visible=False, fixedrange=True),
+                hovermode=False
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    with col_empty:
+        st.write("")
+
+
+def provider_config(provider_name):
+    configs = {
+        "Groq": {
+            "base_url": "https://api.groq.com/openai/v1",
+            "model": "llama-3.3-70b-versatile"
+        },
+        "Perplexity": {
+            "base_url": "https://api.perplexity.ai",
+            "model": "sonar"
+        },
+        "OpenAI Compatible": {
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4o-mini"
+        }
+    }
+    return configs[provider_name]
 
 
 def ask_openai_compatible(prompt, api_key, base_url, model, system_prompt):
@@ -343,24 +381,6 @@ def ask_openai_compatible(prompt, api_key, base_url, model, system_prompt):
     response.raise_for_status()
     data = response.json()
     return data["choices"][0]["message"]["content"]
-
-
-def provider_config(provider_name):
-    configs = {
-        "Groq": {
-            "base_url": "https://api.groq.com/openai/v1",
-            "model": "llama-3.3-70b-versatile"
-        },
-        "Perplexity": {
-            "base_url": "https://api.perplexity.ai",
-            "model": "sonar"
-        },
-        "OpenAI Compatible": {
-            "base_url": "https://api.openai.com/v1",
-            "model": "gpt-4o-mini"
-        }
-    }
-    return configs[provider_name]
 
 
 def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
@@ -384,6 +404,7 @@ def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     pnl_col = pick("pnl", "profit", "pl", "realized_pnl", "net_profit", "realized p&l")
     notes_col = pick("notes", "comment", "memo", "description")
     strategy_col = pick("strategy", "tag", "category", "label", "setup")
+    asset_type_col = pick("asset_type", "asset", "product", "market")
 
     rows = []
     for _, row in df.iterrows():
@@ -432,6 +453,7 @@ def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
             percent_val = compute_percent_gain(side_val, entry_val, exit_val)
             strategy_val = str(row[strategy_col]).strip() if strategy_col and pd.notna(row[strategy_col]) else ""
             notes_val = str(row[notes_col]).strip() if notes_col and pd.notna(row[notes_col]) else ""
+            asset_type_val = str(row[asset_type_col]).strip() if asset_type_col and pd.notna(row[asset_type_col]) else ""
 
             if ticker_val:
                 rows.append({
@@ -448,6 +470,7 @@ def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
                     "strategy": strategy_val,
                     "followed_plan": True,
                     "notes": notes_val,
+                    "asset_type": asset_type_val
                 })
         except Exception:
             continue
@@ -463,7 +486,7 @@ def import_trades(user_id, df_norm):
             "entry_time": r["entry_time"],
             "exit_time": r["exit_time"],
             "symbol": r["ticker"],
-            "asset_type": "",
+            "asset_type": r.get("asset_type", ""),
             "side": r["side"].lower(),
             "quantity": float(r["quantity"]),
             "entry_price": float(r["entry_price"]),
@@ -611,46 +634,71 @@ def build_performance_vs_market_chart(daily_df, mode="Futures"):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def get_market_open_times_today():
-    # US regular session: 09:30 Eastern (we'll treat this as fixed)
-    # For your local display, we use system local time but the countdown is based on this reference.
-    now = datetime.datetime.now()
-    today = now.date()
-    market_open = datetime.datetime.combine(today, datetime.time(hour=9, minute=30))
-    # If your server is not in Eastern, this is an approximation;
-    # in practice, you may later adjust for timezone explicitly.
-    return now, market_open
+def get_market_open_countdown(clock_mode):
+    if clock_mode == "Market":
+        now = datetime.datetime.now(ZoneInfo("America/New_York"))
+    else:
+        now = datetime.datetime.now().astimezone()
+
+    market_now = datetime.datetime.now(ZoneInfo("America/New_York"))
+    market_open = market_now.replace(hour=9, minute=30, second=0, microsecond=0)
+
+    if market_now > market_open:
+        next_open = market_open + datetime.timedelta(days=1)
+        while next_open.weekday() >= 5:
+            next_open += datetime.timedelta(days=1)
+    else:
+        next_open = market_open
+        while next_open.weekday() >= 5:
+            next_open += datetime.timedelta(days=1)
+
+    diff = next_open - market_now
+    total_seconds = int(diff.total_seconds())
+
+    return now, total_seconds, next_open
 
 
 def render_clock_and_countdown():
-    now, market_open = get_market_open_times_today()
-    col_clock, col_timer = st.columns(2)
-    with col_clock:
-        st.metric("Current Time", now.strftime("%Y-%m-%d %H:%M:%S"))
-    with col_timer:
-        diff = market_open - now
-        seconds_to_open = int(diff.total_seconds())
-        if seconds_to_open <= 0:
-            st.metric("Time to Open", "Market Open")
+    now, total_seconds, next_open = get_market_open_countdown(st.session_state.clock_mode)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        label = "Current Time (Market)" if st.session_state.clock_mode == "Market" else "Current Time (Local)"
+        st.metric(label, now.strftime("%Y-%m-%d %I:%M:%S %p"))
+
+    with col2:
+        if total_seconds <= 30 * 60:
+            mins = total_seconds // 60
+            secs = total_seconds % 60
+            st.metric("Market Open Countdown", f"{mins:02d}:{secs:02d}")
         else:
-            # Show countdown once we are within 30 minutes, otherwise show time remaining
-            if seconds_to_open <= 30 * 60:
-                minutes = seconds_to_open // 60
-                seconds = seconds_to_open % 60
-                st.metric("Time to Open", f"{minutes:02d}:{seconds:02d}")
-            else:
-                minutes = seconds_to_open // 60
-                st.metric("Time to Open", f"{minutes} min")
+            hours = total_seconds // 3600
+            mins = (total_seconds % 3600) // 60
+            st.metric("Time Until Market Open", f"{hours}h {mins}m")
 
 
-# ----------------- APP FLOW -----------------
+def apply_theme_notice():
+    st.caption(f"Theme setting selected: {st.session_state.theme_mode}. Streamlit supports light/dark themes, and Auto is intended to follow the system preference conceptually. [web:687][web:689]")
+
 
 ensure_session_state()
 sync_supabase_session()
 
 st.title("📈 Trading Journal")
 
-render_clock_and_countdown()  # Clock and pre-open timer
+with st.sidebar:
+    st.header("Settings")
+    st.session_state.theme_mode = st.radio("Theme", ["Auto", "Light", "Dark"], index=["Auto", "Light", "Dark"].index(st.session_state.theme_mode))
+    st.session_state.benchmark_mode = st.radio("Benchmark Mode", ["Futures", "ETF"], index=["Futures", "ETF"].index(st.session_state.benchmark_mode))
+    st.session_state.chart_size = st.radio("Chart Size", ["Sparkline", "Mini"], index=["Sparkline", "Mini"].index(st.session_state.chart_size))
+    st.session_state.clock_mode = st.radio("Clock Display", ["Local", "Market"], index=["Local", "Market"].index(st.session_state.clock_mode))
+    st.session_state.show_calendar_benchmark = st.checkbox("Show Calendar Benchmark Comparison", value=st.session_state.show_calendar_benchmark)
+    st.session_state.account_size_default = st.number_input("Default Account Size ($)", min_value=100.0, value=float(st.session_state.account_size_default), step=100.0)
+    st.session_state.default_asset_type = st.selectbox("Default Asset Type", ["Stocks", "Futures", "Crypto", "Forex", "Options", "Other"], index=["Stocks", "Futures", "Crypto", "Forex", "Options", "Other"].index(st.session_state.default_asset_type))
+    st.session_state.default_trade_side = st.selectbox("Default Trade Side", ["Long", "Short"], index=["Long", "Short"].index(st.session_state.default_trade_side))
+
+apply_theme_notice()
+render_clock_and_countdown()
 
 if not st.session_state.logged_in:
     login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
@@ -728,24 +776,15 @@ if not st.session_state.logged_in:
 
 st.sidebar.success(f"Logged in as {st.session_state.username}")
 st.sidebar.caption(st.session_state.email if st.session_state.email else "")
-account_size = st.sidebar.number_input("Account Size ($) for % calendar", min_value=100.0, value=25000.0, step=100.0)
 
 if st.sidebar.button("Log out"):
     sign_out_user()
     st.rerun()
 
-st.session_state.benchmark_mode = st.sidebar.radio("Benchmark Mode", ["Futures", "ETF"])
-
-top_left, top_right = st.columns([3, 1])
-with top_right:
-    if st.button("Refresh Market Data"):
-        fetch_quotes.clear()
-        fetch_intraday.clear()
-        st.session_state.refresh_market = True
-        st.rerun()
-
-with top_left:
-    st.subheader("Market Overview")
+if st.sidebar.button("Refresh Market Data"):
+    fetch_quotes.clear()
+    fetch_intraday.clear()
+    st.rerun()
 
 try:
     df_watch_for_top = get_watchlist_df(st.session_state.user_id)
@@ -773,14 +812,14 @@ if not df_watch_for_top.empty and "ticker" in df_watch_for_top.columns:
 
 watch_quotes = fetch_quotes(watch_symbols) if watch_symbols else []
 
-st.markdown("#### Benchmarks (Price + 10D / 30m Line)")
+st.subheader("Market Overview")
 for q in market_quotes:
     symbol = q["symbol"]
     intraday_df = fetch_intraday(symbol, period="10d", interval="30m")
     render_quote_and_chart_row(symbol, q, intraday_df)
 
 if watch_quotes:
-    st.markdown("#### Watchlist (Price + 10D / 30m Line)")
+    st.subheader("Watchlist Movers")
     for q in watch_quotes:
         symbol = q["symbol"]
         intraday_df = fetch_intraday(symbol, period="10d", interval="30m")
@@ -877,12 +916,14 @@ with trade_tab:
 
         col4, col5, col6 = st.columns(3)
         ticker = col4.text_input("Ticker / Instrument")
-        side = col5.selectbox("Side", ["Long", "Short"])
-        qty = col6.number_input("Quantity", min_value=0.0)
+        asset_type = col5.selectbox("Asset Type", ["Stocks", "Futures", "Crypto", "Forex", "Options", "Other"],
+                                    index=["Stocks", "Futures", "Crypto", "Forex", "Options", "Other"].index(st.session_state.default_asset_type))
+        side = col6.selectbox("Side", ["Long", "Short"], index=["Long", "Short"].index(st.session_state.default_trade_side))
 
-        col7, col8 = st.columns(2)
-        entry = col7.number_input("Entry Price", min_value=0.0)
-        exitp = col8.number_input("Exit Price", min_value=0.0)
+        col7, col8, col9 = st.columns(3)
+        qty = col7.number_input("Quantity", min_value=0.0)
+        entry = col8.number_input("Entry Price", min_value=0.0)
+        exitp = col9.number_input("Exit Price", min_value=0.0)
 
         strategy = st.selectbox("Linked Strategy", strategy_options)
         followed_plan = st.checkbox("I followed my plan on this trade", value=True)
@@ -902,7 +943,8 @@ with trade_tab:
                     exitp,
                     strategy,
                     followed_plan,
-                    notes
+                    notes,
+                    asset_type
                 )
                 st.success(f"Trade saved. P&L: ${pnl:,.2f} | Return: {pct:+.2f}%")
                 st.rerun()
@@ -1058,6 +1100,13 @@ with calendar_tab:
     selected_year = c1.selectbox("Year", list(range(today.year - 2, today.year + 3)), index=2)
     selected_month = c2.selectbox("Month", list(range(1, 13)), index=today.month - 1)
 
+    account_size = st.number_input(
+        "Account Size ($) for % calendar",
+        min_value=100.0,
+        value=float(st.session_state.account_size_default),
+        step=100.0
+    )
+
     if not df_cal.empty:
         df_cal["date"] = pd.to_datetime(df_cal["date"], errors="coerce")
         df_cal = df_cal.dropna(subset=["date"])
@@ -1073,15 +1122,16 @@ with calendar_tab:
         month_df = daily[daily["date"].str.startswith(f"{selected_year:04d}-{selected_month:02d}")]
         st.dataframe(month_df, use_container_width=True)
 
-        st.subheader("Performance vs Market (Calendar Period)")
-        perf_month = daily[daily["date"].str.startswith(f"{selected_year:04d}-{selected_month:02d}")]
-        if perf_month.empty:
-            st.info("No trades in this month to compare against the market.")
-        else:
-            perf_month_sorted = perf_month.copy()
-            perf_month_sorted["date"] = pd.to_datetime(perf_month_sorted["date"], errors="coerce")
-            perf_month_sorted = perf_month_sorted.dropna(subset=["date"]).sort_values("date")
-            build_performance_vs_market_chart(perf_month_sorted, mode=st.session_state.benchmark_mode)
+        if st.session_state.show_calendar_benchmark:
+            st.subheader("Performance vs Market (Calendar Period)")
+            perf_month = daily[daily["date"].str.startswith(f"{selected_year:04d}-{selected_month:02d}")]
+            if perf_month.empty:
+                st.info("No trades in this month to compare against the market.")
+            else:
+                perf_month_sorted = perf_month.copy()
+                perf_month_sorted["date"] = pd.to_datetime(perf_month_sorted["date"], errors="coerce")
+                perf_month_sorted = perf_month_sorted.dropna(subset=["date"]).sort_values("date")
+                build_performance_vs_market_chart(perf_month_sorted, mode=st.session_state.benchmark_mode)
     else:
         st.info("No trades available for calendar view yet.")
 
