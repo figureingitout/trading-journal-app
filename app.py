@@ -9,14 +9,6 @@ import plotly.express as px
 import streamlit as st
 from supabase import create_client, Client
 
-# Optional: only used if installed
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
-    AGGRID_AVAILABLE = True
-except Exception:
-    AGGRID_AVAILABLE = False
-
-
 # =========================
 # Page config
 # =========================
@@ -27,7 +19,7 @@ st.set_page_config(
 )
 
 # =========================
-# Styling
+# Simple styling
 # =========================
 st.markdown("""
 <style>
@@ -37,7 +29,7 @@ st.markdown("""
     max-width: 96rem;
 }
 
-/* Top header: title left, clock right */
+/* Header */
 .app-header {
     display: flex;
     align-items: baseline;
@@ -69,18 +61,6 @@ div[data-testid="stMetric"] {
     background: rgba(15,23,42,0.4);
 }
 
-/* Generic cards */
-.section-card {
-    border: 1px solid rgba(148,163,184,0.35);
-    border-radius: 14px;
-    padding: 14px;
-    background: rgba(15,23,42,0.5);
-}
-.small-muted {
-    color: #9aa0a6;
-    font-size: 0.9rem;
-}
-
 /* Calendar */
 .calendar-header {
     text-align: center;
@@ -102,10 +82,6 @@ div[data-testid="stMetric"] {
     background: rgba(15,23,42,0.25);
     border-style: dashed;
 }
-.calendar-cell.today {
-    border-color: #fbbf24;
-    box-shadow: 0 0 0 1px rgba(251,191,36,0.6);
-}
 .calendar-day-num {
     font-size: 0.95rem;
     font-weight: 700;
@@ -122,17 +98,6 @@ div[data-testid="stMetric"] {
     margin-top: 6px;
     background: rgba(148,163,184,0.25);
 }
-.today-badge {
-    position: absolute;
-    top: 6px;
-    right: 8px;
-    font-size: 0.7rem;
-    padding: 2px 6px;
-    border-radius: 999px;
-    background: rgba(251,191,36,0.9);
-    color: #111827;
-    font-weight: 600;
-}
 
 /* Watchlist top controls */
 .watchlist-top {
@@ -141,22 +106,6 @@ div[data-testid="stMetric"] {
     padding: 12px 14px;
     margin-bottom: 14px;
     background: rgba(15,23,42,0.5);
-}
-
-/* Mini futures row in Watchlist */
-.futures-mini-row {
-    margin-bottom: 8px;
-}
-.futures-mini-title {
-    font-size: 0.85rem;
-    color: #9aa0a6;
-    margin-bottom: 4px;
-}
-
-/* Minor tweaks */
-hr {
-    margin-top: 0.5rem;
-    margin-bottom: 1rem;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -179,12 +128,10 @@ WATCHLIST_COLUMNS = [
     "catalyst", "status", "created_at"
 ]
 
-FUTURES_SYMBOLS_DEFAULT = ["ES", "NQ", "YM", "RTY", "CL", "GC"]
+FUTURES_SYMBOLS_DEFAULT = ["ES", "NQ"]
 
-US_MARKET_OPEN_ET = time(9, 30)   # 9:30 AM Eastern
-US_MARKET_CLOSE_ET = time(16, 0)  # 4:00 PM Eastern
-PREOPEN_WINDOW_MINUTES = 30       # countdown starts this many minutes before open
-
+US_MARKET_OPEN_ET = time(9, 30)
+US_MARKET_CLOSE_ET = time(16, 0)
 
 # =========================
 # Helpers
@@ -242,22 +189,8 @@ def fetch_table_columns(table_name: str):
     return []
 
 
-def get_existing_trade_columns():
-    cols = fetch_table_columns("trades")
-    if cols:
-        return cols
-    return []
-
-
-def get_existing_watchlist_columns():
-    cols = fetch_table_columns("watchlist")
-    if cols:
-        return cols
-    return []
-
-
 def trade_select_columns():
-    existing = get_existing_trade_columns()
+    existing = fetch_table_columns("trades")
     if not existing:
         return CORE_REQUIRED_TRADE_COLUMNS
     return [c for c in DEFAULT_TRADE_COLUMNS if c in existing]
@@ -301,10 +234,8 @@ def get_watchlist_df():
     if not db_ready():
         return empty, "Supabase is not configured."
 
-    existing = get_existing_watchlist_columns()
     try:
-        cols = [c for c in WATCHLIST_COLUMNS if c in existing] or existing
-        res = supabase.table("watchlist").select(",".join(cols) if cols else "*").order("created_at", desc=True).execute()
+        res = supabase.table("watchlist").select("*").order("created_at", desc=True).execute()
         rows = getattr(res, "data", None) or []
         df = pd.DataFrame(rows)
     except Exception:
@@ -316,169 +247,6 @@ def get_watchlist_df():
 
     df = ensure_datetime_col(df, "created_at")
     return df[WATCHLIST_COLUMNS], None
-
-
-def invalidate_cache():
-    get_trades_df.clear()
-    get_watchlist_df.clear()
-    fetch_table_columns.clear()
-
-
-def upsert_trade(payload, trade_id=None):
-    if not db_ready():
-        return False, "Supabase is not configured."
-
-    try:
-        if trade_id:
-            res = supabase.table("trades").update(payload).eq("id", trade_id).execute()
-        else:
-            res = supabase.table("trades").insert(payload).execute()
-        invalidate_cache()
-        return True, res
-    except Exception as e:
-        return False, str(e)
-
-
-def delete_trade(trade_id):
-    if not db_ready():
-        return False, "Supabase is not configured."
-
-    try:
-        res = supabase.table("trades").delete().eq("id", trade_id).execute()
-        invalidate_cache()
-        return True, res
-    except Exception as e:
-        return False, str(e)
-
-
-def upsert_watchlist(payload, row_id=None):
-    if not db_ready():
-        return False, "Supabase is not configured."
-
-    try:
-        if row_id:
-            res = supabase.table("watchlist").update(payload).eq("id", row_id).execute()
-        else:
-            res = supabase.table("watchlist").insert(payload).execute()
-        invalidate_cache()
-        return True, res
-    except Exception as e:
-        return False, str(e)
-
-
-def delete_watchlist(row_id):
-    if not db_ready():
-        return False, "Supabase is not configured."
-
-    try:
-        res = supabase.table("watchlist").delete().eq("id", row_id).execute()
-        invalidate_cache()
-        return True, res
-    except Exception as e:
-        return False, str(e)
-
-
-def daily_calendar_agg(trades_df: pd.DataFrame):
-    if trades_df.empty or "trade_date" not in trades_df.columns:
-        return pd.DataFrame(columns=["date", "daily_net_pnl", "daily_pct", "follow_ratio", "trade_count"])
-
-    df = trades_df.copy()
-    df = df.dropna(subset=["trade_date"])
-    if df.empty:
-        return pd.DataFrame(columns=["date", "daily_net_pnl", "daily_pct", "follow_ratio", "trade_count"])
-
-    df["date"] = pd.to_datetime(df["trade_date"]).dt.date
-    if "pnl" not in df.columns:
-        df["pnl"] = 0.0
-    df["pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0.0)
-
-    if "followed_plan" in df.columns:
-        follow_series = df["followed_plan"].astype("boolean")
-    else:
-        follow_series = pd.Series([pd.NA] * len(df), index=df.index, dtype="boolean")
-
-    g = df.groupby("date", as_index=False).agg(
-        daily_net_pnl=("pnl", "sum"),
-        trade_count=("ticker", "count")
-    )
-
-    follow_df = df[["date"]].copy()
-    follow_df["fp"] = follow_series.astype("float")
-    follow_ratio = follow_df.groupby("date", as_index=False)["fp"].mean().rename(columns={"fp": "follow_ratio"})
-
-    out = g.merge(follow_ratio, on="date", how="left")
-
-    base_capital = 20000.0
-    out["daily_pct"] = out["daily_net_pnl"] / base_capital * 100.0
-
-    return out.sort_values("date")
-
-
-def pnl_class(x):
-    x = safe_float(x, 0.0)
-    if x > 0:
-        return "pnl-pos"
-    if x < 0:
-        return "pnl-neg"
-    return "pnl-flat"
-
-
-def render_calendar_grid(year: int, month: int, cal_df: pd.DataFrame):
-    day_map = {}
-    if cal_df is not None and not cal_df.empty:
-        for _, row in cal_df.iterrows():
-            day_map[row["date"]] = row.to_dict()
-
-    today = datetime.now().date()
-
-    dow = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    cols = st.columns(7)
-    for i, name in enumerate(dow):
-        cols[i].markdown(f"<div class='calendar-header'>{name}</div>", unsafe_allow_html=True)
-
-    weeks = calendar.Calendar(firstweekday=6).monthdayscalendar(year, month)
-
-    for week in weeks:
-        row_cols = st.columns(7)
-        for idx, day in enumerate(week):
-            with row_cols[idx]:
-                if day == 0:
-                    st.markdown("<div class='calendar-cell empty'></div>", unsafe_allow_html=True)
-                    continue
-
-                d = date(year, month, day)
-                row = day_map.get(d, None)
-                is_today = (d == today)
-
-                if row is None:
-                    html = f"""
-                    <div class='calendar-cell{" today" if is_today else ""}'>
-                        <div class='calendar-day-num'>{day}</div>
-                        <div class='small-muted'>No trades</div>
-                        {"<div class='today-badge'>Today</div>" if is_today else ""}
-                    </div>
-                    """
-                    st.markdown(html, unsafe_allow_html=True)
-                else:
-                    net = safe_float(row.get("daily_net_pnl"), 0.0)
-                    tcount = int(row.get("trade_count", 0) or 0)
-                    fr = row.get("follow_ratio", np.nan)
-                    pct = safe_float(row.get("daily_pct"), 0.0)
-
-                    follow_text = "N/A"
-                    if pd.notna(fr):
-                        follow_text = f"{fr*100:.0f}% plan"
-
-                    html = f"""
-                    <div class='calendar-cell{" today" if is_today else ""}'>
-                        <div class='calendar-day-num'>{day}</div>
-                        <div class='{pnl_class(net)}'>{format_money(net)} ({pct:+.2f}%)</div>
-                        <div class='small-muted'>{tcount} trade{'s' if tcount != 1 else ''}</div>
-                        <div class='tag'>{follow_text}</div>
-                        {"<div class='today-badge'>Today</div>" if is_today else ""}
-                    </div>
-                    """
-                    st.markdown(html, unsafe_allow_html=True)
 
 
 def trades_metrics(df: pd.DataFrame):
@@ -510,7 +278,6 @@ def trades_metrics(df: pd.DataFrame):
     wins = int((work["pnl"] > 0).sum())
 
     base_capital = 20000.0
-
     net_pnl = float(work["pnl"].sum())
     net_pct = net_pnl / base_capital * 100.0
 
@@ -585,11 +352,7 @@ def setup_pnl_chart(df: pd.DataFrame):
     return fig
 
 
-def mini_futures_chart(symbol: str):
-    """
-    Build a small mock mini-chart for a futures instrument.
-    Later you can replace the data with real prices.
-    """
+def futures_chart(symbol: str):
     idx = pd.date_range(
         end=pd.Timestamp.now(),
         periods=30,
@@ -599,10 +362,6 @@ def mini_futures_chart(symbol: str):
     base_map = {
         "ES": 6200,
         "NQ": 22800,
-        "YM": 44500,
-        "RTY": 2180,
-        "CL": 82,
-        "GC": 2380,
     }
     base = base_map.get(symbol, 100)
 
@@ -610,19 +369,10 @@ def mini_futures_chart(symbol: str):
     steps = np.random.normal(0, 1, len(idx))
     prices = base + np.cumsum(steps)
 
-    df = pd.DataFrame({
-        "time": idx,
-        "price": prices
-    })
-
+    df = pd.DataFrame({"time": idx, "price": prices})
     line_color = "#22c55e" if prices[-1] >= prices[0] else "#ef4444"
 
-    fig = px.line(
-        df,
-        x="time",
-        y="price",
-        title=f"{symbol} mini-chart",
-    )
+    fig = px.line(df, x="time", y="price", title=f"{symbol} chart")
     fig.update_traces(line=dict(color=line_color, width=2))
     fig.update_layout(
         height=160,
@@ -638,51 +388,120 @@ def mini_futures_chart(symbol: str):
     return fig
 
 
-def get_futures_snapshot(symbols):
-    rows = []
-    for s in symbols:
-        rows.append({
-            "Instrument": f"{s} Futures",
-            "Last": np.nan,
-            "Change": np.nan,
-            "%": np.nan,
-        })
-    return pd.DataFrame(rows)
+def daily_calendar_agg(trades_df: pd.DataFrame):
+    if trades_df.empty or "trade_date" not in trades_df.columns:
+        return pd.DataFrame(columns=["date", "daily_net_pnl", "daily_pct", "follow_ratio", "trade_count"])
+
+    df = trades_df.copy()
+    df = df.dropna(subset=["trade_date"])
+    if df.empty:
+        return pd.DataFrame(columns=["date", "daily_net_pnl", "daily_pct", "follow_ratio", "trade_count"])
+
+    df["date"] = pd.to_datetime(df["trade_date"]).dt.date
+    df["pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0.0)
+
+    if "followed_plan" in df.columns:
+        follow_series = df["followed_plan"].astype("boolean")
+    else:
+        follow_series = pd.Series([pd.NA] * len(df), index=df.index, dtype="boolean")
+
+    g = df.groupby("date", as_index=False).agg(
+        daily_net_pnl=("pnl", "sum"),
+        trade_count=("ticker", "count")
+    )
+
+    follow_df = df[["date"]].copy()
+    follow_df["fp"] = follow_series.astype("float")
+    follow_ratio = follow_df.groupby("date", as_index=False)["fp"].mean().rename(columns={"fp": "follow_ratio"})
+
+    out = g.merge(follow_ratio, on="date", how="left")
+
+    base_capital = 20000.0
+    out["daily_pct"] = out["daily_net_pnl"] / base_capital * 100.0
+
+    return out.sort_values("date")
 
 
 def get_local_now():
     return datetime.now(timezone.utc).astimezone()
 
 
-def market_status_and_countdown():
+def market_status():
     now_local = get_local_now()
 
-    et = timezone(timedelta(hours=-4))  # simple ET offset
+    et = timezone(timedelta(hours=-4))
     now_et = now_local.astimezone(et)
     today_et = now_et.date()
 
     open_dt = datetime.combine(today_et, US_MARKET_OPEN_ET, tzinfo=et)
     close_dt = datetime.combine(today_et, US_MARKET_CLOSE_ET, tzinfo=et)
 
-    status = "Market closed"
-    countdown = None
-    ding = False
-
     if now_et < open_dt:
-        delta_to_open = open_dt - now_et
-        if delta_to_open <= timedelta(minutes=PREOPEN_WINDOW_MINUTES):
-            status = "Market opens in"
-            countdown = delta_to_open
-            if delta_to_open <= timedelta(seconds=1):
-                ding = True
-        else:
-            status = "Market closed"
+        return now_local, "Market closed"
     elif open_dt <= now_et <= close_dt:
-        status = "Market open"
+        return now_local, "Market open"
     else:
-        status = "Market closed"
+        return now_local, "Market closed"
 
-    return now_local, status, countdown, ding
+
+def render_calendar_grid(year: int, month: int, cal_df: pd.DataFrame):
+    day_map = {}
+    if cal_df is not None and not cal_df.empty:
+        for _, row in cal_df.iterrows():
+            day_map[row["date"]] = row.to_dict()
+
+    today = datetime.now().date()
+
+    dow = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    cols = st.columns(7)
+    for i, name in enumerate(dow):
+        cols[i].markdown(f"<div class='calendar-header'>{name}</div>", unsafe_allow_html=True)
+
+    weeks = calendar.Calendar(firstweekday=6).monthdayscalendar(year, month)
+
+    for week in weeks:
+        row_cols = st.columns(7)
+        for idx, day in enumerate(week):
+            with row_cols[idx]:
+                if day == 0:
+                    st.markdown("<div class='calendar-cell empty'></div>", unsafe_allow_html=True)
+                    continue
+
+                d = date(year, month, day)
+                row = day_map.get(d, None)
+                is_today = (d == today)
+
+                if row is None:
+                    html = f"""
+                    <div class='calendar-cell'>
+                        <div class='calendar-day-num'>{day}</div>
+                        <div class='small-muted'>No trades</div>
+                        {"<div class='tag'>Today</div>" if is_today else ""}
+                    </div>
+                    """
+                    st.markdown(html, unsafe_allow_html=True)
+                else:
+                    net = safe_float(row.get("daily_net_pnl"), 0.0)
+                    tcount = int(row.get("trade_count", 0) or 0)
+                    fr = row.get("follow_ratio", np.nan)
+                    pct = safe_float(row.get("daily_pct"), 0.0)
+
+                    follow_text = "N/A"
+                    if pd.notna(fr):
+                        follow_text = f"{fr*100:.0f}% plan"
+
+                    html = f"""
+                    <div class='calendar-cell'>
+                        <div class='calendar-day-num'>{day}</div>
+                        <div class='{ "pnl-pos" if net > 0 else "pnl-neg" if net < 0 else "pnl-flat" }'>
+                            {format_money(net)} ({pct:+.2f}%)
+                        </div>
+                        <div class='small-muted'>{tcount} trade{'s' if tcount != 1 else ''}</div>
+                        <div class='tag'>{follow_text}</div>
+                        {"<div class='tag'>Today</div>" if is_today else ""}
+                    </div>
+                    """
+                    st.markdown(html, unsafe_allow_html=True)
 
 
 # =========================
@@ -694,15 +513,9 @@ watchlist_df, watchlist_msg = get_watchlist_df()
 # =========================
 # Header
 # =========================
-now_local, market_status, countdown, ding = market_status_and_countdown()
-date_str = now_local.strftime("%a, %b %-d, %Y") if hasattr(now_local, "strftime") else ""
-time_str = now_local.strftime("%-I:%M %p") if hasattr(now_local, "strftime") else ""
-
-status_line = market_status
-if countdown:
-    mins = int(countdown.total_seconds() // 60)
-    secs = int(countdown.total_seconds() % 60)
-    status_line = f"{market_status} {mins:02d}:{secs:02d}"
+now_local, status = market_status()
+date_str = now_local.strftime("%a, %b %-d, %Y")
+time_str = now_local.strftime("%-I:%M %p")
 
 header_html = f"""
 <div class="app-header">
@@ -711,15 +524,11 @@ header_html = f"""
   </div>
   <div class="app-header-right">
     <div><strong>{time_str}</strong> • {date_str}</div>
-    <div class="app-header-status">{status_line}</div>
+    <div class="app-header-status">{status}</div>
   </div>
 </div>
 """
-
 st.markdown(header_html, unsafe_allow_html=True)
-
-if ding:
-    st.audio("https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg")
 
 if not db_ready():
     st.warning("Supabase credentials are missing. The app will still render, but database features will not work.")
@@ -737,7 +546,7 @@ tab_dashboard, tab_trades, tab_watchlist, tab_calendar = st.tabs(
 with tab_dashboard:
     metrics = trades_metrics(trades_df)
 
-    # Order: Trades, Daily P&L, Net P&L, Gross P&L, Commissions, Win Rate, Avg Trade
+    # Simple fixed order: Trades, Daily P&L, Net P&L, Gross P&L, Commissions, Win Rate, Avg Trade
     m_trades, m_daily, m_net, m_gross, m_comm, m_win, m_avg = st.columns(7)
     m_trades.metric("Trades", f"{metrics['trades']}")
     m_daily.metric("Daily P&L", format_money(metrics["daily_pnl"]), f"{metrics['daily_pct']:+.2f}%")
@@ -747,7 +556,7 @@ with tab_dashboard:
     m_win.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
     m_avg.metric("Avg Trade", format_money(metrics["avg_trade"]))
 
-    main_col, side_col = st.columns([3, 1])
+    main_col, side_col = st.columns([4, 1])
 
     with main_col:
         c1, c2 = st.columns(2)
@@ -769,11 +578,10 @@ with tab_dashboard:
             st.plotly_chart(fig_setup, use_container_width=True)
 
     with side_col:
-        st.markdown("#### Futures mini-charts")
-        fig_es = mini_futures_chart("ES")
-        st.plotly_chart(fig_es, use_container_width=True)
-        fig_nq = mini_futures_chart("NQ")
-        st.plotly_chart(fig_nq, use_container_width=True)
+        st.markdown("#### Futures charts")
+        for sym in FUTURES_SYMBOLS_DEFAULT:
+            fig = futures_chart(sym)
+            st.plotly_chart(fig, use_container_width=True)
 
 # =========================
 # Trades
@@ -781,73 +589,39 @@ with tab_dashboard:
 with tab_trades:
     st.subheader("Trades")
 
-    with st.expander("Add / Edit Trade", expanded=False):
-        selected_trade_id = None
-        trade_ids = trades_df["id"].dropna().tolist() if "id" in trades_df.columns and not trades_df.empty else []
-        pick_existing = st.checkbox("Edit existing trade")
-        if pick_existing and trade_ids:
-            selected_trade_id = st.selectbox("Select trade ID", trade_ids)
-            existing = trades_df[trades_df["id"] == selected_trade_id].iloc[0].to_dict()
-        else:
-            existing = {}
+    st.markdown("### Manual entry")
+    selected_trade_id = None
+    trade_ids = trades_df["id"].dropna().tolist() if "id" in trades_df.columns and not trades_df.empty else []
+    pick_existing = st.checkbox("Edit existing trade")
+    if pick_existing and trade_ids:
+        selected_trade_id = st.selectbox("Select trade ID", trade_ids)
+        existing = trades_df[trades_df["id"] == selected_trade_id].iloc[0].to_dict()
+    else:
+        existing = {}
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            trade_date = st.date_input(
-                "Trade date",
-                value=(existing.get("trade_date").date() if pd.notna(existing.get("trade_date")) else date.today())
-            )
-            ticker = st.text_input("Ticker", value="" if pd.isna(existing.get("ticker")) else str(existing.get("ticker", "")))
-            setup = st.text_input("Setup", value="" if pd.isna(existing.get("setup")) else str(existing.get("setup", "")))
-            side = st.selectbox("Side", ["Long", "Short"], index=0 if str(existing.get("side", "Long")).lower() != "short" else 1)
-        with c2:
-            contracts = st.number_input("Contracts", min_value=0, value=int(safe_float(existing.get("contracts"), 1)))
-            entry = st.number_input("Entry", value=float(safe_float(existing.get("entry"), 0.0)), format="%.4f")
-            exit_ = st.number_input("Exit", value=float(safe_float(existing.get("exit"), 0.0)), format="%.4f")
-            session = st.text_input("Session", value="" if pd.isna(existing.get("session")) else str(existing.get("session", "")))
-        with c3:
-            gross_pnl = st.number_input("Gross P&L", value=float(safe_float(existing.get("gross_pnl"), safe_float(existing.get("pnl"), 0.0))), format="%.2f")
-            commissions = st.number_input("Commissions", value=float(safe_float(existing.get("commissions"), 0.0)), format="%.2f")
-            pnl = st.number_input("Net P&L", value=float(safe_float(existing.get("pnl"), gross_pnl - commissions)), format="%.2f")
-            followed_plan = st.checkbox("Followed plan", value=bool(existing.get("followed_plan")) if pd.notna(existing.get("followed_plan")) else False)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        trade_date = st.date_input(
+            "Trade date",
+            value=(existing.get("trade_date").date() if pd.notna(existing.get("trade_date")) else date.today())
+        )
+        ticker = st.text_input("Ticker", value="" if pd.isna(existing.get("ticker")) else str(existing.get("ticker", "")))
+        setup = st.text_input("Setup", value="" if pd.isna(existing.get("setup")) else str(existing.get("setup", "")))
+        side = st.selectbox("Side", ["Long", "Short"], index=0 if str(existing.get("side", "Long")).lower() != "short" else 1)
+    with c2:
+        contracts = st.number_input("Contracts", min_value=0, value=int(safe_float(existing.get("contracts"), 1)))
+        entry = st.number_input("Entry", value=float(safe_float(existing.get("entry"), 0.0)), format="%.4f")
+        exit_ = st.number_input("Exit", value=float(safe_float(existing.get("exit"), 0.0)), format="%.4f")
+        session = st.text_input("Session", value="" if pd.isna(existing.get("session")) else str(existing.get("session", "")))
+    with c3:
+        gross_pnl = st.number_input("Gross P&L", value=float(safe_float(existing.get("gross_pnl"), safe_float(existing.get("pnl"), 0.0))), format="%.2f")
+        commissions = st.number_input("Commissions", value=float(safe_float(existing.get("commissions"), 0.0)), format="%.2f")
+        pnl = st.number_input("Net P&L", value=float(safe_float(existing.get("pnl"), gross_pnl - commissions)), format="%.2f")
+        followed_plan = st.checkbox("Followed plan", value=bool(existing.get("followed_plan")) if pd.notna(existing.get("followed_plan")) else False)
 
-        notes = st.text_area("Notes", value="" if pd.isna(existing.get("notes")) else str(existing.get("notes", "")))
+    notes = st.text_area("Notes", value="" if pd.isna(existing.get("notes")) else str(existing.get("notes", "")))
 
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("Save trade", use_container_width=True):
-                payload = {
-                    "trade_date": str(trade_date),
-                    "ticker": ticker,
-                    "setup": setup,
-                    "side": side,
-                    "contracts": contracts,
-                    "entry": entry,
-                    "exit": exit_,
-                    "gross_pnl": gross_pnl,
-                    "commissions": commissions,
-                    "pnl": pnl,
-                    "followed_plan": followed_plan,
-                    "notes": notes,
-                    "session": session,
-                }
-                ok, msg = upsert_trade(payload, trade_id=selected_trade_id)
-                if ok:
-                    st.success("Trade saved.")
-                    st.rerun()
-                else:
-                    st.error(f"Save failed: {msg}")
-        with b2:
-            if selected_trade_id and st.button("Delete trade", use_container_width=True):
-                ok, msg = delete_trade(selected_trade_id)
-                if ok:
-                    st.success("Trade deleted.")
-                    st.rerun()
-                else:
-                    st.error(f"Delete failed: {msg}")
-
-    st.markdown("### Manual import")
-    st.info("Manual import will go here (e.g., file upload / broker export).")
+    st.info("Save/delete logic can be wired to Supabase here once the schema is final.")
 
     st.markdown("### Trade log")
     display_df = trades_df.copy()
@@ -857,49 +631,13 @@ with tab_trades:
     if trades_msg:
         st.info(trades_msg)
 
-    if AGGRID_AVAILABLE and not display_df.empty:
-        gb = GridOptionsBuilder.from_dataframe(display_df)
-        gb.configure_default_column(editable=False, filter=True, sortable=True, resizable=True)
-        gb.configure_selection("single", use_checkbox=True)
-        grid_options = gb.build()
-        AgGrid(
-            display_df,
-            gridOptions=grid_options,
-            theme="streamlit",
-            height=420,
-            update_mode=GridUpdateMode.SELECTION_CHANGED,
-            fit_columns_on_grid_load=True,
-            use_container_width=True,
-            reload_data=False,
-        )
-    else:
-        st.dataframe(display_df, use_container_width=True, height=420)
+    st.dataframe(display_df, use_container_width=True, height=420)
 
 # =========================
 # Watchlist
 # =========================
 with tab_watchlist:
     st.subheader("Watchlist")
-
-    st.markdown("<div class='futures-mini-row'>", unsafe_allow_html=True)
-    fc1, fc2, fc3 = st.columns(3)
-    fut_df = get_futures_snapshot(FUTURES_SYMBOLS_DEFAULT)
-    with fc1:
-        st.markdown("<div class='futures-mini-title'>Market context</div>", unsafe_allow_html=True)
-        st.dataframe(fut_df, use_container_width=True, height=130)
-    with fc2:
-        st.markdown("<div class='futures-mini-title'>Notes</div>", unsafe_allow_html=True)
-        st.text_area(
-            "Futures prep",
-            placeholder="Key levels, overnight inventory, bias, economic events...",
-            height=130,
-            label_visibility="collapsed",
-        )
-    with fc3:
-        st.markdown("<div class='futures-mini-title'>Symbols</div>", unsafe_allow_html=True)
-        symbols_text = ", ".join(FUTURES_SYMBOLS_DEFAULT)
-        st.text_input("Symbols", value=symbols_text, label_visibility="collapsed")
-    st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='watchlist-top'>", unsafe_allow_html=True)
     top1, top2, top3, top4, top5 = st.columns([1.2, 1.2, 1.6, 1.2, 1.0])
@@ -914,22 +652,8 @@ with tab_watchlist:
     with top5:
         st.write("")
         st.write("")
-        add_watch = st.button("Add to watchlist", use_container_width=True)
+        st.button("Add to watchlist", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
-
-    if add_watch:
-        payload = {
-            "symbol": wl_symbol,
-            "bias": wl_bias,
-            "thesis": wl_thesis,
-            "status": wl_status,
-        }
-        ok, msg = upsert_watchlist(payload)
-        if ok:
-            st.success("Added to watchlist.")
-            st.rerun()
-        else:
-            st.error(f"Add failed: {msg}")
 
     if watchlist_msg:
         st.info(watchlist_msg)
@@ -937,62 +661,7 @@ with tab_watchlist:
     if watchlist_df.empty:
         st.info("Nothing here yet. Add a symbol to get started.")
     else:
-        show_cols = [c for c in ["id", "symbol", "bias", "thesis", "entry_zone", "invalidate", "catalyst", "status", "notes", "created_at"] if c in watchlist_df.columns]
-        st.dataframe(watchlist_df[show_cols], use_container_width=True, height=420)
-
-        with st.expander("Edit / Delete Watchlist Item", expanded=False):
-            ids = watchlist_df["id"].dropna().tolist() if "id" in watchlist_df.columns else []
-            if ids:
-                row_id = st.selectbox("Select item ID", ids)
-                row = watchlist_df[watchlist_df["id"] == row_id].iloc[0].to_dict()
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    symbol = st.text_input("Symbol ", value=str(row.get("symbol", "")))
-                    bias = st.selectbox(
-                        "Bias ",
-                        ["Long", "Short", "Neutral"],
-                        index=["Long", "Short", "Neutral"].index(str(row.get("bias", "Neutral"))) if str(row.get("bias", "Neutral")) in ["Long", "Short", "Neutral"] else 2
-                    )
-                    thesis = st.text_input("Thesis ", value="" if pd.isna(row.get("thesis")) else str(row.get("thesis", "")))
-                    status = st.selectbox(
-                        "Status ",
-                        ["Active", "Watching", "Triggered", "Closed"],
-                        index=["Active", "Watching", "Triggered", "Closed"].index(str(row.get("status", "Watching"))) if str(row.get("status", "Watching")) in ["Active", "Watching", "Triggered", "Closed"] else 1
-                    )
-                with c2:
-                    entry_zone = st.text_input("Entry zone", value="" if pd.isna(row.get("entry_zone")) else str(row.get("entry_zone", "")))
-                    invalidate = st.text_input("Invalidate", value="" if pd.isna(row.get("invalidate")) else str(row.get("invalidate", "")))
-                    catalyst = st.text_input("Catalyst", value="" if pd.isna(row.get("catalyst")) else str(row.get("catalyst", "")))
-                    notes = st.text_area("Notes ", value="" if pd.isna(row.get("notes")) else str(row.get("notes", "")))
-
-                e1, e2 = st.columns(2)
-                with e1:
-                    if st.button("Save watchlist item", use_container_width=True):
-                        payload = {
-                            "symbol": symbol,
-                            "bias": bias,
-                            "thesis": thesis,
-                            "status": status,
-                            "entry_zone": entry_zone,
-                            "invalidate": invalidate,
-                            "catalyst": catalyst,
-                            "notes": notes,
-                        }
-                        ok, msg = upsert_watchlist(payload, row_id=row_id)
-                        if ok:
-                            st.success("Watchlist item saved.")
-                            st.rerun()
-                        else:
-                            st.error(f"Save failed: {msg}")
-                with e2:
-                    if st.button("Delete watchlist item", use_container_width=True):
-                        ok, msg = delete_watchlist(row_id)
-                        if ok:
-                            st.success("Watchlist item deleted.")
-                            st.rerun()
-                        else:
-                            st.error(f"Delete failed: {msg}")
+        st.dataframe(watchlist_df, use_container_width=True, height=420)
 
 # =========================
 # Calendar
@@ -1008,19 +677,11 @@ with tab_calendar:
         month = st.selectbox("Month", list(range(1, 13)), index=today.month - 1, format_func=lambda m: calendar.month_name[m])
 
     cal_df = pd.DataFrame(columns=["date", "daily_net_pnl", "daily_pct", "follow_ratio", "trade_count"])
-    cal_notice = None
-
     try:
         if trades_df is not None and not trades_df.empty:
             cal_df = daily_calendar_agg(trades_df)
     except Exception:
-        cal_notice = "Trade data could not be overlaid on the calendar."
+        pass
 
     render_calendar_grid(year, month, cal_df)
-
-    if cal_notice:
-        st.info(cal_notice)
-    elif trades_msg:
-        st.info("Calendar is showing without trade overlays because trades could not be loaded.")
-
-    st.caption("The calendar grid always renders. Trade data is optional and overlays when available.")
+    st.caption("The calendar grid always renders. Trade data overlays when available.")
