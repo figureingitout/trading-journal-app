@@ -281,87 +281,49 @@ def fetch_quotes(symbols):
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def fetch_intraday_with_sma(symbol, period="10d", interval="30m"):
+def fetch_intraday(symbol, period="10d", interval="30m"):
     try:
         hist = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False)
         if hist is None or hist.empty:
             return pd.DataFrame()
         df = hist[["Close"]].copy()
-        df["SMA20"] = df["Close"].rolling(window=20).mean()
-        df["SMA50"] = df["Close"].rolling(window=50).mean()
-        df["SMA200"] = df["Close"].rolling(window=200).mean()
         return df
     except Exception:
         return pd.DataFrame()
 
 
-def render_quote_cards(title, quote_list):
-    st.markdown(f"### {title}")
-    if not quote_list:
-        st.info("No symbols available.")
-        return
+def render_quote_and_chart_row(symbol, quote_data, intraday_df):
+    col_price, col_chart = st.columns([1, 2])
+    with col_price:
+        if quote_data["price"] is None:
+            st.metric(symbol, "N/A", "Unavailable")
+        else:
+            delta_text = (
+                f"{quote_data['change']:+.2f} ({quote_data['change_pct']:+.2f}%)"
+                if quote_data["change"] is not None
+                else "N/A"
+            )
+            st.metric(symbol, f"{quote_data['price']:.2f}", delta_text)
 
-    cols = st.columns(len(quote_list))
-    for col, q in zip(cols, quote_list):
-        with col:
-            if q["price"] is None:
-                st.metric(q["symbol"], "N/A", "Unavailable")
-            else:
-                delta_text = f"{q['change']:+.2f} ({q['change_pct']:+.2f}%)"
-                st.metric(
-                    q["symbol"],
-                    f"{q['price']:.2f}",
-                    delta_text
-                )
-
-
-def render_intraday_chart(symbol, df):
-    if df.empty:
-        st.info(f"No intraday data available for {symbol}.")
-        return
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df.index,
-        y=df["Close"],
-        mode="lines",
-        name=f"{symbol} Price",
-        line=dict(color="white")
-    ))
-
-    if df["SMA20"].notna().any():
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df["SMA20"],
-            mode="lines",
-            name="SMA 20",
-            line=dict(color="yellow")
-        ))
-    if df["SMA50"].notna().any():
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df["SMA50"],
-            mode="lines",
-            name="SMA 50",
-            line=dict(color="cyan")
-        ))
-    if df["SMA200"].notna().any():
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df["SMA200"],
-            mode="lines",
-            name="SMA 200",
-            line=dict(color="magenta")
-        ))
-
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=30, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        template="plotly_dark",
-        height=250,
-        title=f"{symbol} – 10D / 30m with SMA 20, 50, 200"
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    with col_chart:
+        if intraday_df.empty:
+            st.info(f"No intraday data for {symbol}.")
+        else:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=intraday_df.index,
+                y=intraday_df["Close"],
+                mode="lines",
+                name=f"{symbol}",
+                line=dict(color="white", width=1.5)
+            ))
+            fig.update_layout(
+                margin=dict(l=10, r=10, t=10, b=10),
+                template="plotly_dark",
+                height=140,
+                showlegend=False
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
 
 def ask_openai_compatible(prompt, api_key, base_url, model, system_prompt):
@@ -586,17 +548,11 @@ def render_calendar(day_df, selected_year, selected_month):
 
 
 def build_performance_vs_market_chart(daily_df, mode="Futures"):
-    # Your cumulative performance (%)
     perf = daily_df.copy()
     perf = perf.sort_values("date")
-    base = perf["daily_pnl"].iloc[0] if len(perf) > 0 else 0
     perf["cum_pnl"] = perf["daily_pnl"].cumsum()
-    # Treat starting point as 0% and compute percent change vs initial equity proxy
-    # Here we approximate by cumulative P&L relative to initial equity proxy:
-    # If you later want true equity curves, we can wire in account size history.
     perf["your_return_pct"] = (perf["cum_pnl"] / max(abs(perf["daily_pnl"]).sum(), 1)) * 100
 
-    # Market benchmarks over the same dates
     if mode == "Futures":
         symbols = ["MES=F", "MNQ=F", "MYM=F"]
         labels = ["MES", "MNQ", "MYM"]
@@ -621,7 +577,6 @@ def build_performance_vs_market_chart(daily_df, mode="Futures"):
         st.info("No market data available for benchmark comparison.")
         return
 
-    # Align on dates in perf
     fig = go.Figure()
 
     if not perf.empty:
@@ -634,7 +589,6 @@ def build_performance_vs_market_chart(daily_df, mode="Futures"):
         ))
 
     for label, df_idx in index_returns.items():
-        # Align to perf date range
         df_idx = df_idx.copy()
         df_idx = df_idx.loc[df_idx.index.isin(perf["date"])] if not perf.empty else df_idx
         if df_idx.empty:
@@ -657,12 +611,46 @@ def build_performance_vs_market_chart(daily_df, mode="Futures"):
     st.plotly_chart(fig, use_container_width=True)
 
 
+def get_market_open_times_today():
+    # US regular session: 09:30 Eastern (we'll treat this as fixed)
+    # For your local display, we use system local time but the countdown is based on this reference.
+    now = datetime.datetime.now()
+    today = now.date()
+    market_open = datetime.datetime.combine(today, datetime.time(hour=9, minute=30))
+    # If your server is not in Eastern, this is an approximation;
+    # in practice, you may later adjust for timezone explicitly.
+    return now, market_open
+
+
+def render_clock_and_countdown():
+    now, market_open = get_market_open_times_today()
+    col_clock, col_timer = st.columns(2)
+    with col_clock:
+        st.metric("Current Time", now.strftime("%Y-%m-%d %H:%M:%S"))
+    with col_timer:
+        diff = market_open - now
+        seconds_to_open = int(diff.total_seconds())
+        if seconds_to_open <= 0:
+            st.metric("Time to Open", "Market Open")
+        else:
+            # Show countdown once we are within 30 minutes, otherwise show time remaining
+            if seconds_to_open <= 30 * 60:
+                minutes = seconds_to_open // 60
+                seconds = seconds_to_open % 60
+                st.metric("Time to Open", f"{minutes:02d}:{seconds:02d}")
+            else:
+                minutes = seconds_to_open // 60
+                st.metric("Time to Open", f"{minutes} min")
+
+
 # ----------------- APP FLOW -----------------
 
 ensure_session_state()
 sync_supabase_session()
 
 st.title("📈 Trading Journal")
+
+render_clock_and_countdown()  # Clock and pre-open timer
 
 if not st.session_state.logged_in:
     login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
@@ -746,16 +734,13 @@ if st.sidebar.button("Log out"):
     sign_out_user()
     st.rerun()
 
-# Benchmark mode: Futures vs ETF
 st.session_state.benchmark_mode = st.sidebar.radio("Benchmark Mode", ["Futures", "ETF"])
 
-# Market overview controls
 top_left, top_right = st.columns([3, 1])
 with top_right:
     if st.button("Refresh Market Data"):
-        # Clear cache and rerun for fresh quotes/charts
         fetch_quotes.clear()
-        fetch_intraday_with_sma.clear()
+        fetch_intraday.clear()
         st.session_state.refresh_market = True
         st.rerun()
 
@@ -769,10 +754,8 @@ except Exception:
 
 if st.session_state.benchmark_mode == "Futures":
     market_symbols = ["MES=F", "MNQ=F", "MYM=F", "M2K=F", "^VIX"]
-    market_labels = ["MES=F", "MNQ=F", "MYM=F", "M2K=F", "^VIX"]
 else:
     market_symbols = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
-    market_labels = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
 
 market_quotes = fetch_quotes(market_symbols)
 
@@ -790,18 +773,20 @@ if not df_watch_for_top.empty and "ticker" in df_watch_for_top.columns:
 
 watch_quotes = fetch_quotes(watch_symbols) if watch_symbols else []
 
-render_quote_cards("Benchmarks", market_quotes)
+st.markdown("#### Benchmarks (Price + 10D / 30m Line)")
+for q in market_quotes:
+    symbol = q["symbol"]
+    intraday_df = fetch_intraday(symbol, period="10d", interval="30m")
+    render_quote_and_chart_row(symbol, q, intraday_df)
+
 if watch_quotes:
-    render_quote_cards("Watchlist Movers", watch_quotes)
+    st.markdown("#### Watchlist (Price + 10D / 30m Line)")
+    for q in watch_quotes:
+        symbol = q["symbol"]
+        intraday_df = fetch_intraday(symbol, period="10d", interval="30m")
+        render_quote_and_chart_row(symbol, q, intraday_df)
 else:
     st.info("Add some watchlist symbols to show their price action here.")
-
-# Separate charts per benchmark symbol
-st.markdown("#### Benchmark Charts (10D / 30m with SMA 20, 50, 200)")
-for sym, label in zip(market_symbols, market_labels):
-    st.markdown(f"**{label}**")
-    df_intraday = fetch_intraday_with_sma(sym, period="10d", interval="30m")
-    render_intraday_chart(sym, df_intraday)
 
 st.markdown("---")
 
@@ -1089,7 +1074,6 @@ with calendar_tab:
         st.dataframe(month_df, use_container_width=True)
 
         st.subheader("Performance vs Market (Calendar Period)")
-        # Use only days in selected month for comparison chart
         perf_month = daily[daily["date"].str.startswith(f"{selected_year:04d}-{selected_month:02d}")]
         if perf_month.empty:
             st.info("No trades in this month to compare against the market.")
