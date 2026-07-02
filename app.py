@@ -93,8 +93,8 @@ def init_db():
 
 
 def valid_email(email: str) -> bool:
-    pattern = r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
-    return re.match(pattern, email) is not None
+    pattern = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+    return re.match(pattern, email.strip()) is not None
 
 
 def create_user(email: str, username: str, password: str, marketing_opt_in: bool):
