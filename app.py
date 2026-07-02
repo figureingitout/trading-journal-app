@@ -4,6 +4,7 @@ import pandas as pd
 import datetime
 import requests
 import hashlib
+import re
 
 DB_PATH = "trading_journal.db"
 
@@ -16,6 +17,17 @@ def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
 
+def table_columns(conn, table_name):
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return [row[1] for row in rows]
+
+
+def add_column_if_missing(conn, table_name, column_name, column_def):
+    cols = table_columns(conn, table_name)
+    if column_name not in cols:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+
+
 def init_db():
     conn = get_conn()
     c = conn.cursor()
@@ -23,8 +35,10 @@ def init_db():
     c.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE,
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
+        marketing_opt_in INTEGER DEFAULT 0,
         created_at TEXT NOT NULL
     )
     """)
@@ -70,30 +84,58 @@ def init_db():
     )
     """)
 
+    add_column_if_missing(conn, "users", "email", "TEXT")
+    add_column_if_missing(conn, "users", "marketing_opt_in", "INTEGER DEFAULT 0")
+    add_column_if_missing(conn, "users", "created_at", "TEXT")
+
     conn.commit()
     conn.close()
 
 
-def create_user(username: str, password: str):
+def valid_email(email: str) -> bool:
+    pattern = r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    return re.match(pattern, email) is not None
+
+
+def create_user(email: str, username: str, password: str, marketing_opt_in: bool):
     conn = get_conn()
     try:
         conn.execute(
-            "INSERT INTO users (username, password_hash, created_at) VALUES (?,?,?)",
-            (username.strip().lower(), hash_password(password), datetime.datetime.now().isoformat())
+            """
+            INSERT INTO users (email, username, password_hash, marketing_opt_in, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                email.strip().lower(),
+                username.strip().lower(),
+                hash_password(password),
+                1 if marketing_opt_in else 0,
+                datetime.datetime.now().isoformat()
+            )
         )
         conn.commit()
         return True, "Account created successfully."
-    except sqlite3.IntegrityError:
-        return False, "That username already exists."
+    except sqlite3.IntegrityError as e:
+        msg = str(e).lower()
+        if "email" in msg:
+            return False, "That email is already registered."
+        if "username" in msg:
+            return False, "That username already exists."
+        return False, "Unable to create account."
     finally:
         conn.close()
 
 
-def authenticate_user(username: str, password: str):
+def authenticate_user(login_value: str, password: str):
     conn = get_conn()
+    value = login_value.strip().lower()
     row = conn.execute(
-        "SELECT id, username FROM users WHERE username = ? AND password_hash = ?",
-        (username.strip().lower(), hash_password(password))
+        """
+        SELECT id, username, email
+        FROM users
+        WHERE (username = ? OR email = ?) AND password_hash = ?
+        """,
+        (value, value, hash_password(password))
     ).fetchone()
     conn.close()
     return row
@@ -176,6 +218,8 @@ if "user_id" not in st.session_state:
     st.session_state.user_id = None
 if "username" not in st.session_state:
     st.session_state.username = None
+if "email" not in st.session_state:
+    st.session_state.email = None
 if "ai_history" not in st.session_state:
     st.session_state.ai_history = []
 if "user_api_key" not in st.session_state:
@@ -189,33 +233,42 @@ if not st.session_state.logged_in:
     with login_tab:
         st.subheader("Login")
         with st.form("login_form"):
-            login_user = st.text_input("Username")
+            login_value = st.text_input("Email or Username")
             login_pass = st.text_input("Password", type="password")
             login_submit = st.form_submit_button("Login")
             if login_submit:
-                row = authenticate_user(login_user, login_pass)
+                row = authenticate_user(login_value, login_pass)
                 if row:
                     st.session_state.logged_in = True
                     st.session_state.user_id = row[0]
                     st.session_state.username = row[1]
+                    st.session_state.email = row[2]
                     st.success(f"Welcome back, {row[1]}!")
                     st.rerun()
                 else:
-                    st.error("Invalid username or password.")
+                    st.error("Invalid email/username or password.")
 
     with signup_tab:
         st.subheader("Create Account")
         with st.form("signup_form"):
+            new_email = st.text_input("Email")
             new_user = st.text_input("Choose a username")
             new_pass = st.text_input("Choose a password", type="password")
+            confirm_pass = st.text_input("Confirm password", type="password")
+            marketing_opt_in = st.checkbox("Email me product updates and trading journal tips")
             create_submit = st.form_submit_button("Create account")
+
             if create_submit:
-                if len(new_user.strip()) < 3:
+                if not valid_email(new_email.strip()):
+                    st.error("Please enter a valid email address.")
+                elif len(new_user.strip()) < 3:
                     st.error("Username must be at least 3 characters.")
                 elif len(new_pass) < 6:
                     st.error("Password must be at least 6 characters.")
+                elif new_pass != confirm_pass:
+                    st.error("Passwords do not match.")
                 else:
-                    ok, msg = create_user(new_user, new_pass)
+                    ok, msg = create_user(new_email, new_user, new_pass, marketing_opt_in)
                     if ok:
                         st.success(msg)
                     else:
@@ -224,10 +277,13 @@ if not st.session_state.logged_in:
     st.stop()
 
 st.sidebar.success(f"Logged in as {st.session_state.username}")
+st.sidebar.caption(st.session_state.email if st.session_state.email else "")
+
 if st.sidebar.button("Log out"):
     st.session_state.logged_in = False
     st.session_state.user_id = None
     st.session_state.username = None
+    st.session_state.email = None
     st.session_state.ai_history = []
     st.session_state.user_api_key = ""
     st.rerun()
