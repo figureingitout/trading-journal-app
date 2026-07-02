@@ -11,11 +11,15 @@ from supabase import create_client
 
 st.set_page_config(page_title="Trading Journal", layout="wide")
 
+# ---------- SUPABASE CLIENT ----------
+
 supabase = create_client(
     st.secrets["SUPABASE_URL"],
     st.secrets["SUPABASE_KEY"]
 )
 
+
+# ---------- UTILITIES ----------
 
 def valid_email(email: str) -> bool:
     pattern = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
@@ -33,6 +37,11 @@ def compute_percent_gain(side, entry_price, exit_price):
         return 0.0
 
 
+def compute_net_pnl(side, qty, entry, exitp, commissions):
+    gross = (exitp - entry) * qty if side == "Long" else (entry - exitp) * qty
+    return gross, gross - commissions
+
+
 def ensure_session_state():
     defaults = {
         "logged_in": False,
@@ -45,12 +54,12 @@ def ensure_session_state():
         "user_api_key": "",
         "benchmark_mode": "Futures",
         "chart_size": "Sparkline",
-        "clock_mode": "Local",
+        "clock_mode": "Market",
         "show_calendar_benchmark": True,
         "account_size_default": 25000.0,
         "default_asset_type": "Stocks",
         "default_trade_side": "Long",
-        "theme_mode": "Auto"
+        "theme_mode": "Auto",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -84,6 +93,8 @@ def sync_supabase_session():
     st.session_state.username = None
     st.session_state.email = None
 
+
+# ---------- AUTH ----------
 
 def sign_up_user(email: str, username: str, password: str):
     response = supabase.auth.sign_up({
@@ -134,6 +145,8 @@ def save_profile_if_needed(user_id: str, email: str, username: str):
         pass
 
 
+# ---------- STRATEGIES ----------
+
 def add_strategy(user_id, name, market_type, setup_type, time_of_day, market_conditions,
                  entry_criteria, exit_criteria, risk_rules, checklist, notes):
     supabase.table("strategies").insert({
@@ -171,8 +184,11 @@ def delete_strategy(strategy_id):
     )
 
 
-def log_trade(user_id, date, entry_time, exit_time, ticker, side, qty, entry, exitp, strategy, followed_plan, notes, asset_type):
-    pnl = (exitp - entry) * qty if side == "Long" else (entry - exitp) * qty
+# ---------- TRADES ----------
+
+def log_trade(user_id, date, entry_time, exit_time, ticker, side, qty, entry, exitp,
+              strategy, followed_plan, notes, asset_type, commissions):
+    gross_pnl, net_pnl = compute_net_pnl(side, qty, entry, exitp, commissions)
     percent_gain = compute_percent_gain(side, entry, exitp)
 
     supabase.table("trades").insert({
@@ -186,19 +202,21 @@ def log_trade(user_id, date, entry_time, exit_time, ticker, side, qty, entry, ex
         "quantity": qty,
         "entry_price": entry,
         "exit_price": exitp,
-        "pnl": pnl,
+        "gross_pnl": gross_pnl,
+        "commissions": commissions,
+        "pnl": net_pnl,
         "percent_gain": percent_gain,
         "followed_plan": followed_plan,
         "notes": notes
     }).execute()
 
-    return pnl, percent_gain
+    return gross_pnl, net_pnl, percent_gain
 
 
 def get_trades_df(user_id):
     response = (
         supabase.table("trades")
-        .select("id,trade_date,entry_time,exit_time,symbol,asset_type,side,quantity,entry_price,exit_price,pnl,percent_gain,followed_plan,notes")
+        .select("id,trade_date,entry_time,exit_time,symbol,asset_type,side,quantity,entry_price,exit_price,gross_pnl,commissions,pnl,percent_gain,followed_plan,notes")
         .eq("user_id", user_id)
         .order("trade_date", desc=True)
         .order("entry_time", desc=True)
@@ -208,7 +226,8 @@ def get_trades_df(user_id):
     if not df.empty:
         df = df.rename(columns={
             "trade_date": "date",
-            "symbol": "ticker"
+            "symbol": "ticker",
+            "pnl": "net_pnl"
         })
         df["side"] = df["side"].fillna("").str.title()
     return df
@@ -222,6 +241,8 @@ def delete_trade(trade_id):
         .execute()
     )
 
+
+# ---------- WATCHLIST ----------
 
 def add_watchlist(user_id, ticker, reason):
     supabase.table("watchlist").insert({
@@ -244,6 +265,8 @@ def get_watchlist_df(user_id):
         df = df.rename(columns={"symbol": "ticker"})
     return df
 
+
+# ---------- MARKET DATA ----------
 
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_quotes(symbols):
@@ -299,52 +322,67 @@ def fetch_intraday(symbol, period="10d", interval="30m"):
 
 def get_chart_dimensions():
     if st.session_state.chart_size == "Sparkline":
-        return {"height": 60, "width_col_ratio": [1.4, 0.8, 6.8]}
-    return {"height": 95, "width_col_ratio": [1.4, 1.2, 5.8]}
+        return {"height": 60}
+    return {"height": 95}
 
 
-def render_quote_and_chart_row(symbol, quote_data, intraday_df):
+def render_quote_and_chart_card(symbol, quote_data, intraday_df):
     dims = get_chart_dimensions()
-    col_price, col_chart, col_empty = st.columns(dims["width_col_ratio"])
+    card = st.container()
+    with card:
+        col_price, col_chart = st.columns([1.2, 1.8])
+        with col_price:
+            if quote_data["price"] is None:
+                st.metric(symbol, "N/A", "Unavailable")
+            else:
+                delta_text = (
+                    f"{quote_data['change']:+.2f} ({quote_data['change_pct']:+.2f}%)"
+                    if quote_data["change"] is not None
+                    else "N/A"
+                )
+                st.metric(symbol, f"{quote_data['price']:.2f}", delta_text)
 
-    with col_price:
-        if quote_data["price"] is None:
-            st.metric(symbol, "N/A", "Unavailable")
-        else:
-            delta_text = (
-                f"{quote_data['change']:+.2f} ({quote_data['change_pct']:+.2f}%)"
-                if quote_data["change"] is not None
-                else "N/A"
-            )
-            st.metric(symbol, f"{quote_data['price']:.2f}", delta_text)
+        with col_chart:
+            if intraday_df.empty:
+                st.caption("No chart data")
+            else:
+                fig = go.Figure()
+                line_color = "#22c55e" if intraday_df["Close"].iloc[-1] >= intraday_df["Close"].iloc[0] else "#ef4444"
+                fig.add_trace(go.Scatter(
+                    x=intraday_df.index,
+                    y=intraday_df["Close"],
+                    mode="lines",
+                    line=dict(color=line_color, width=1.6),
+                    hoverinfo="skip"
+                ))
+                fig.update_layout(
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    height=dims["height"],
+                    template="plotly_dark",
+                    showlegend=False,
+                    xaxis=dict(visible=False, fixedrange=True),
+                    yaxis=dict(visible=False, fixedrange=True),
+                    hovermode=False
+                )
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    with col_chart:
-        if intraday_df.empty:
-            st.caption("No chart data")
-        else:
-            fig = go.Figure()
-            line_color = "#22c55e" if intraday_df["Close"].iloc[-1] >= intraday_df["Close"].iloc[0] else "#ef4444"
-            fig.add_trace(go.Scatter(
-                x=intraday_df.index,
-                y=intraday_df["Close"],
-                mode="lines",
-                line=dict(color=line_color, width=1.6),
-                hoverinfo="skip"
-            ))
-            fig.update_layout(
-                margin=dict(l=0, r=0, t=0, b=0),
-                height=dims["height"],
-                template="plotly_dark",
-                showlegend=False,
-                xaxis=dict(visible=False, fixedrange=True),
-                yaxis=dict(visible=False, fixedrange=True),
-                hovermode=False
-            )
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    with col_empty:
-        st.write("")
+def render_market_grid(quotes, title):
+    if not quotes:
+        st.info(f"No symbols available for {title}.")
+        return
+    st.markdown(f"### {title}")
+    cols_per_row = 3
+    for i in range(0, len(quotes), cols_per_row):
+        row_quotes = quotes[i:i + cols_per_row]
+        row_cols = st.columns(len(row_quotes))
+        for col, q in zip(row_cols, row_quotes):
+            with col:
+                intraday_df = fetch_intraday(q["symbol"], period="10d", interval="30m")
+                render_quote_and_chart_card(q["symbol"], q, intraday_df)
 
+
+# ---------- AI PROVIDER ----------
 
 def provider_config(provider_name):
     configs = {
@@ -383,6 +421,8 @@ def ask_openai_compatible(prompt, api_key, base_url, model, system_prompt):
     return data["choices"][0]["message"]["content"]
 
 
+# ---------- IMPORT NORMALIZER ----------
+
 def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
     lower_cols = {c.lower(): c for c in df.columns}
@@ -401,7 +441,8 @@ def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     qty_col = pick("quantity", "qty", "size", "amount", "contracts", "shares")
     entry_col = pick("entry_price", "price", "open_price", "avg_price", "fill_price", "buy_price")
     exit_col = pick("exit_price", "close_price", "sell_price", "exit", "closing_price")
-    pnl_col = pick("pnl", "profit", "pl", "realized_pnl", "net_profit", "realized p&l")
+    gross_col = pick("gross_pnl", "gross", "profit", "realized_pnl", "realized p&l")
+    comm_col = pick("commissions", "commission", "fees", "fee")
     notes_col = pick("notes", "comment", "memo", "description")
     strategy_col = pick("strategy", "tag", "category", "label", "setup")
     asset_type_col = pick("asset_type", "asset", "product", "market")
@@ -445,12 +486,15 @@ def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
             entry_val = float(row[entry_col]) if entry_col and pd.notna(row[entry_col]) else 0.0
             exit_val = float(row[exit_col]) if exit_col and pd.notna(row[exit_col]) else entry_val
 
-            if pnl_col and pd.notna(row[pnl_col]):
-                pnl_val = float(row[pnl_col])
+            if gross_col and pd.notna(row[gross_col]):
+                gross_val = float(row[gross_col])
             else:
-                pnl_val = (exit_val - entry_val) * qty_val if side_val == "Long" else (entry_val - exit_val) * qty_val
+                gross_val = (exit_val - entry_val) * qty_val if side_val == "Long" else (entry_val - exit_val) * qty_val
 
+            commissions_val = float(row[comm_col]) if comm_col and pd.notna(row[comm_col]) else 0.0
+            net_val = gross_val - commissions_val
             percent_val = compute_percent_gain(side_val, entry_val, exit_val)
+
             strategy_val = str(row[strategy_col]).strip() if strategy_col and pd.notna(row[strategy_col]) else ""
             notes_val = str(row[notes_col]).strip() if notes_col and pd.notna(row[notes_col]) else ""
             asset_type_val = str(row[asset_type_col]).strip() if asset_type_col and pd.notna(row[asset_type_col]) else ""
@@ -465,7 +509,9 @@ def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
                     "quantity": qty_val,
                     "entry_price": entry_val,
                     "exit_price": exit_val,
-                    "pnl": pnl_val,
+                    "gross_pnl": gross_val,
+                    "commissions": commissions_val,
+                    "net_pnl": net_val,
                     "percent_gain": percent_val,
                     "strategy": strategy_val,
                     "followed_plan": True,
@@ -491,12 +537,16 @@ def import_trades(user_id, df_norm):
             "quantity": float(r["quantity"]),
             "entry_price": float(r["entry_price"]),
             "exit_price": float(r["exit_price"]),
-            "pnl": float(r["pnl"]),
+            "gross_pnl": float(r["gross_pnl"]),
+            "commissions": float(r["commissions"]),
+            "pnl": float(r["net_pnl"]),
             "percent_gain": float(r["percent_gain"]),
             "followed_plan": bool(r["followed_plan"]),
             "notes": r["notes"]
         }).execute()
 
+
+# ---------- CALENDAR & PERFORMANCE ----------
 
 def render_calendar(day_df, selected_year, selected_month):
     cal = calendar.Calendar(firstweekday=6)
@@ -517,7 +567,7 @@ def render_calendar(day_df, selected_year, selected_month):
         justify-content:space-between;
     }
     .day-empty {
-        background:#f0f0f0;
+        background:#1e293b;
         border-radius:12px;
         min-height:110px;
     }
@@ -539,16 +589,16 @@ def render_calendar(day_df, selected_year, selected_month):
                 date_key = f"{selected_year:04d}-{selected_month:02d}-{day:02d}"
                 row = day_df[day_df["date"] == date_key]
                 if not row.empty:
-                    pnl = float(row["daily_pnl"].iloc[0])
+                    pnl = float(row["daily_net_pnl"].iloc[0])
                     pct = float(row["daily_pct"].iloc[0])
                     followed_ratio = float(row["follow_ratio"].iloc[0])
 
-                    bg = "#1f7a1f" if pnl > 0 else "#b42318" if pnl < 0 else "#6b7280"
-                    border = "#22c55e" if followed_ratio >= 1 else "#ef4444" if followed_ratio == 0 else "#f59e0b"
+                    bg = "#15803d" if pnl > 0 else "#b91c1c" if pnl < 0 else "#4b5563"
+                    border = "#22c55e" if followed_ratio >= 1 else "#ef4444" if followed_ratio == 0 else "#f97316"
                     plan_text = "Plan ✓" if followed_ratio >= 1 else "Plan ✗" if followed_ratio == 0 else "Plan Mixed"
 
                     tiles += f"""
-                    <div class="day-tile" style="background:{bg}; border:4px solid {border};">
+                    <div class="day-tile" style="background:{bg}; border:3px solid {border};">
                         <div class="day-num">{day}</div>
                         <div>
                             <div><strong>${pnl:,.2f}</strong></div>
@@ -559,7 +609,7 @@ def render_calendar(day_df, selected_year, selected_month):
                     """
                 else:
                     tiles += f"""
-                    <div class="day-tile" style="background:#9ca3af; border:4px solid #d1d5db;">
+                    <div class="day-tile" style="background:#334155; border:3px solid #1f2937;">
                         <div class="day-num">{day}</div>
                         <div class="small">No trades</div>
                         <div class="small">-</div>
@@ -573,8 +623,8 @@ def render_calendar(day_df, selected_year, selected_month):
 def build_performance_vs_market_chart(daily_df, mode="Futures"):
     perf = daily_df.copy()
     perf = perf.sort_values("date")
-    perf["cum_pnl"] = perf["daily_pnl"].cumsum()
-    perf["your_return_pct"] = (perf["cum_pnl"] / max(abs(perf["daily_pnl"]).sum(), 1)) * 100
+    perf["cum_net_pnl"] = perf["daily_net_pnl"].cumsum()
+    perf["your_return_pct"] = (perf["cum_net_pnl"] / max(abs(perf["daily_net_pnl"]).sum(), 1)) * 100
 
     if mode == "Futures":
         symbols = ["MES=F", "MNQ=F", "MYM=F"]
@@ -608,7 +658,7 @@ def build_performance_vs_market_chart(daily_df, mode="Futures"):
             y=perf["your_return_pct"],
             mode="lines",
             name="Your Performance",
-            line=dict(color="white", width=2)
+            line=dict(color="#e5e7eb", width=2)
         ))
 
     for label, df_idx in index_returns.items():
@@ -633,6 +683,8 @@ def build_performance_vs_market_chart(daily_df, mode="Futures"):
     )
     st.plotly_chart(fig, use_container_width=True)
 
+
+# ---------- CLOCK ----------
 
 def get_market_open_countdown(clock_mode):
     if clock_mode == "Market":
@@ -665,7 +717,6 @@ def render_clock_and_countdown():
     with col1:
         label = "Current Time (Market)" if st.session_state.clock_mode == "Market" else "Current Time (Local)"
         st.metric(label, now.strftime("%Y-%m-%d %I:%M:%S %p"))
-
     with col2:
         if total_seconds <= 30 * 60:
             mins = total_seconds // 60
@@ -677,9 +728,7 @@ def render_clock_and_countdown():
             st.metric("Time Until Market Open", f"{hours}h {mins}m")
 
 
-def apply_theme_notice():
-    st.caption(f"Theme setting selected: {st.session_state.theme_mode}. Streamlit supports light/dark themes, and Auto is intended to follow the system preference conceptually. [web:687][web:689]")
-
+# ---------- APP INITIALIZATION ----------
 
 ensure_session_state()
 sync_supabase_session()
@@ -688,17 +737,18 @@ st.title("📈 Trading Journal")
 
 with st.sidebar:
     st.header("Settings")
-    st.session_state.theme_mode = st.radio("Theme", ["Auto", "Light", "Dark"], index=["Auto", "Light", "Dark"].index(st.session_state.theme_mode))
     st.session_state.benchmark_mode = st.radio("Benchmark Mode", ["Futures", "ETF"], index=["Futures", "ETF"].index(st.session_state.benchmark_mode))
     st.session_state.chart_size = st.radio("Chart Size", ["Sparkline", "Mini"], index=["Sparkline", "Mini"].index(st.session_state.chart_size))
     st.session_state.clock_mode = st.radio("Clock Display", ["Local", "Market"], index=["Local", "Market"].index(st.session_state.clock_mode))
     st.session_state.show_calendar_benchmark = st.checkbox("Show Calendar Benchmark Comparison", value=st.session_state.show_calendar_benchmark)
     st.session_state.account_size_default = st.number_input("Default Account Size ($)", min_value=100.0, value=float(st.session_state.account_size_default), step=100.0)
-    st.session_state.default_asset_type = st.selectbox("Default Asset Type", ["Stocks", "Futures", "Crypto", "Forex", "Options", "Other"], index=["Stocks", "Futures", "Crypto", "Forex", "Options", "Other"].index(st.session_state.default_asset_type))
+    st.session_state.default_asset_type = st.selectbox("Default Asset Type", ["Stocks", "Futures", "Crypto", "Forex", "Options", "Other"],
+                                                      index=["Stocks", "Futures", "Crypto", "Forex", "Options", "Other"].index(st.session_state.default_asset_type))
     st.session_state.default_trade_side = st.selectbox("Default Trade Side", ["Long", "Short"], index=["Long", "Short"].index(st.session_state.default_trade_side))
 
-apply_theme_notice()
 render_clock_and_countdown()
+
+# ---------- AUTH GATE ----------
 
 if not st.session_state.logged_in:
     login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
@@ -786,6 +836,8 @@ if st.sidebar.button("Refresh Market Data"):
     fetch_intraday.clear()
     st.rerun()
 
+# ---------- MARKET OVERVIEW ----------
+
 try:
     df_watch_for_top = get_watchlist_df(st.session_state.user_id)
 except Exception:
@@ -806,32 +858,29 @@ if not df_watch_for_top.empty and "ticker" in df_watch_for_top.columns:
         .astype(str)
         .str.upper()
         .drop_duplicates()
-        .head(5)
+        .head(6)
         .tolist()
     )
 
 watch_quotes = fetch_quotes(watch_symbols) if watch_symbols else []
 
 st.subheader("Market Overview")
-for q in market_quotes:
-    symbol = q["symbol"]
-    intraday_df = fetch_intraday(symbol, period="10d", interval="30m")
-    render_quote_and_chart_row(symbol, q, intraday_df)
+render_market_grid(market_quotes, "Benchmarks")
 
 if watch_quotes:
-    st.subheader("Watchlist Movers")
-    for q in watch_quotes:
-        symbol = q["symbol"]
-        intraday_df = fetch_intraday(symbol, period="10d", interval="30m")
-        render_quote_and_chart_row(symbol, q, intraday_df)
+    render_market_grid(watch_quotes, "Watchlist Movers")
 else:
     st.info("Add some watchlist symbols to show their price action here.")
 
 st.markdown("---")
 
+# ---------- TABS ----------
+
 strategy_tab, trade_tab, watch_tab, analytics_tab, calendar_tab, ai_tab = st.tabs([
     "My Strategy", "Trades", "Watchlist", "Analytics", "Calendar", "AI Assistant"
 ])
+
+# --- My Strategy ---
 
 with strategy_tab:
     st.subheader("My Strategy")
@@ -898,6 +947,8 @@ with strategy_tab:
     except Exception as e:
         st.error(f"Could not load strategies: {e}")
 
+# --- Trades ---
+
 with trade_tab:
     st.subheader("Log a Trade (Manual)")
     try:
@@ -925,13 +976,14 @@ with trade_tab:
         entry = col8.number_input("Entry Price", min_value=0.0)
         exitp = col9.number_input("Exit Price", min_value=0.0)
 
+        commissions = st.number_input("Commissions ($)", min_value=0.0, value=0.0, step=0.01)
         strategy = st.selectbox("Linked Strategy", strategy_options)
         followed_plan = st.checkbox("I followed my plan on this trade", value=True)
         notes = st.text_area("Trade Notes")
 
         if st.form_submit_button("Save Trade"):
             try:
-                pnl, pct = log_trade(
+                gross_pnl, net_pnl, pct = log_trade(
                     st.session_state.user_id,
                     str(date),
                     entry_time.strftime("%H:%M"),
@@ -944,9 +996,10 @@ with trade_tab:
                     strategy,
                     followed_plan,
                     notes,
-                    asset_type
+                    asset_type,
+                    commissions
                 )
-                st.success(f"Trade saved. P&L: ${pnl:,.2f} | Return: {pct:+.2f}%")
+                st.success(f"Trade saved. Gross: ${gross_pnl:,.2f} | Net: ${net_pnl:,.2f} | Return: {pct:+.2f}%")
                 st.rerun()
             except Exception as e:
                 st.error(f"Could not save trade: {e}")
@@ -995,12 +1048,16 @@ with trade_tab:
             df_display = df_trades.copy()
             df_display["followed_plan"] = df_display["followed_plan"].map({True: "Yes", False: "No", 1: "Yes", 0: "No"})
             st.subheader("Your Trades")
-            st.dataframe(df_display.drop(columns=["id"]), use_container_width=True)
+            display_cols = [
+                "date", "ticker", "asset_type", "side", "quantity",
+                "entry_price", "exit_price", "gross_pnl", "commissions", "net_pnl", "percent_gain", "followed_plan", "notes"
+            ]
+            st.dataframe(df_display[display_cols], use_container_width=True)
 
             st.markdown("### Delete a Trade")
             trade_delete_options = {}
             for _, row in df_trades.iterrows():
-                label = f"{row['date']} | {row['ticker']} | {row['side']} | P&L ${float(row['pnl']):,.2f}"
+                label = f"{row['date']} | {row['ticker']} | {row['side']} | Net ${float(row['net_pnl']):,.2f}"
                 trade_delete_options[label] = row["id"]
 
             trade_to_delete_label = st.selectbox(
@@ -1026,6 +1083,8 @@ with trade_tab:
     except Exception as e:
         st.error(f"Could not load trades: {e}")
 
+# --- Watchlist ---
+
 with watch_tab:
     st.subheader("Watchlist")
     with st.form("watch_form", clear_on_submit=True):
@@ -1045,6 +1104,8 @@ with watch_tab:
     except Exception as e:
         st.error(f"Could not load watchlist: {e}")
 
+# --- Analytics ---
+
 with analytics_tab:
     st.subheader("Performance Analytics")
     try:
@@ -1054,38 +1115,42 @@ with analytics_tab:
         st.error(f"Could not load analytics: {e}")
 
     if not df_analytics.empty:
-        total_pnl = df_analytics["pnl"].sum()
-        win_rate = (df_analytics["pnl"] > 0).mean() * 100
+        total_gross = df_analytics["gross_pnl"].sum()
+        total_comm = df_analytics["commissions"].sum()
+        total_net = df_analytics["net_pnl"].sum()
+        win_rate = (df_analytics["net_pnl"] > 0).mean() * 100
         avg_pct = df_analytics["percent_gain"].mean()
-        avg_win_pct = df_analytics[df_analytics["pnl"] > 0]["percent_gain"].mean() if not df_analytics[df_analytics["pnl"] > 0].empty else 0
-        avg_loss_pct = df_analytics[df_analytics["pnl"] < 0]["percent_gain"].mean() if not df_analytics[df_analytics["pnl"] < 0].empty else 0
+        avg_win_pct = df_analytics[df_analytics["net_pnl"] > 0]["percent_gain"].mean() if not df_analytics[df_analytics["net_pnl"] > 0].empty else 0
+        avg_loss_pct = df_analytics[df_analytics["net_pnl"] < 0]["percent_gain"].mean() if not df_analytics[df_analytics["net_pnl"] < 0].empty else 0
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total P&L", f"${total_pnl:,.2f}")
-        c2.metric("Win Rate", f"{win_rate:.1f}%")
-        c3.metric("Avg % / Trade", f"{avg_pct:+.2f}%")
-        c4.metric("Largest Trade", f"${df_analytics['pnl'].max():,.2f}")
+        c1.metric("Total Gross P&L", f"${total_gross:,.2f}")
+        c2.metric("Total Commissions", f"${total_comm:,.2f}")
+        c3.metric("Total Net P&L", f"${total_net:,.2f}")
+        c4.metric("Win Rate (Net)", f"{win_rate:.1f}%")
 
         df_analytics["date"] = pd.to_datetime(df_analytics["date"], errors="coerce")
-        daily = df_analytics.groupby("date", as_index=False)["pnl"].sum().sort_values("date")
-        daily["running_total"] = daily["pnl"].cumsum()
+        daily = df_analytics.groupby("date", as_index=False)["net_pnl"].sum().sort_values("date")
+        daily["running_total_net"] = daily["net_pnl"].cumsum()
 
-        st.subheader("Running Total P&L")
-        st.line_chart(daily.set_index("date")["running_total"])
+        st.subheader("Running Total Net P&L")
+        st.line_chart(daily.set_index("date")["running_total_net"])
 
         df_analytics["hour"] = pd.to_datetime(df_analytics["entry_time"], format="%H:%M", errors="coerce").dt.hour
-        hourly = df_analytics.groupby("hour", dropna=True)["pnl"].sum()
+        hourly = df_analytics.groupby("hour", dropna=True)["net_pnl"].sum()
         if not hourly.empty:
-            st.subheader("P&L by Hour of Day")
+            st.subheader("Net P&L by Hour of Day")
             st.bar_chart(hourly)
 
         st.subheader("Discipline Metrics")
         followed_pct = (df_analytics["followed_plan"].astype(str).isin(["True", "1"])).mean() * 100
         st.metric("Trades Following Plan", f"{followed_pct:.1f}%")
-        st.write(f"Average % gain on winners: {avg_win_pct:+.2f}%")
-        st.write(f"Average % gain on losers: {avg_loss_pct:+.2f}%")
+        st.write(f"Average % gain on winners (net): {avg_win_pct:+.2f}%")
+        st.write(f"Average % gain on losers (net): {avg_loss_pct:+.2f}%")
     else:
         st.info("Log or import some trades to see analytics.")
+
+# --- Calendar ---
 
 with calendar_tab:
     st.subheader("Calendar View")
@@ -1112,10 +1177,10 @@ with calendar_tab:
         df_cal = df_cal.dropna(subset=["date"])
         df_cal["date_str"] = df_cal["date"].dt.strftime("%Y-%m-%d")
         daily = df_cal.groupby("date_str").agg(
-            daily_pnl=("pnl", "sum"),
+            daily_net_pnl=("net_pnl", "sum"),
             follow_ratio=("followed_plan", "mean")
         ).reset_index().rename(columns={"date_str": "date"})
-        daily["daily_pct"] = (daily["daily_pnl"] / account_size) * 100
+        daily["daily_pct"] = (daily["daily_net_pnl"] / account_size) * 100
         render_calendar(daily, selected_year, selected_month)
 
         st.subheader("Daily Summary")
@@ -1135,6 +1200,8 @@ with calendar_tab:
     else:
         st.info("No trades available for calendar view yet.")
 
+# --- AI Assistant ---
+
 with ai_tab:
     st.subheader("AI Assistant")
     st.caption("Use your own API key. The assistant is tuned for strategy, time-of-day, discipline, and performance review.")
@@ -1147,8 +1214,8 @@ with ai_tab:
         "System prompt",
         value=(
             "You are a trading journal assistant. Analyze trades by time of day, percent gain, "
-            "dollar P&L, strategy, and whether the trader followed the plan. Help identify patterns, "
-            "mistakes, strengths, and discipline issues."
+            "dollar P&L (gross/net), strategy, and whether the trader followed the plan. "
+            "Help identify patterns, mistakes, strengths, and discipline issues."
         )
     )
     api_key_input = st.text_input("Your API key", type="password", value=st.session_state.user_api_key)
