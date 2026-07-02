@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 # =========================
-# Simple styling
+# Styling
 # =========================
 st.markdown("""
 <style>
@@ -128,8 +128,22 @@ WATCHLIST_COLUMNS = [
     "catalyst", "status", "created_at"
 ]
 
-# ES, NQ, RTY (Russell 2000 futures)
-FUTURES_SYMBOLS_DEFAULT = ["ES", "NQ", "RTY"]
+# Futures: ES, NQ, RTY (Russell 2000), VIX
+FUTURES_SYMBOLS_DEFAULT = ["ES", "NQ", "RTY", "VIX"]
+
+FUTURES_NAMES = {
+    "ES": "S&P 500 (ES)",
+    "NQ": "Nasdaq 100 (NQ)",
+    "RTY": "Russell 2000 (RTY)",
+    "VIX": "VIX Volatility Index",
+}
+
+FUTURES_BASE = {
+    "ES": 6200,
+    "NQ": 22800,
+    "RTY": 2180,
+    "VIX": 15,
+}
 
 US_MARKET_OPEN_ET = time(9, 30)
 US_MARKET_CLOSE_ET = time(16, 0)
@@ -359,31 +373,29 @@ def generate_futures_series(symbol: str):
         periods=30,
         freq=pd.Timedelta(minutes=10)
     )
-
-    base_map = {
-        "ES": 6200,
-        "NQ": 22800,
-        "RTY": 2180,
-    }
-    base = base_map.get(symbol, 100)
+    base = FUTURES_BASE.get(symbol, 100)
 
     np.random.seed(abs(hash(symbol)) % (2**32))
     steps = np.random.normal(0, 1, len(idx))
     prices = base + np.cumsum(steps)
 
-    return idx, prices
+    return idx, prices, base
 
 
 def futures_chart(symbol: str):
-    idx, prices = generate_futures_series(symbol)
+    idx, prices, base = generate_futures_series(symbol)
     df = pd.DataFrame({"time": idx, "price": prices})
-    line_color = "#22c55e" if prices[-1] >= prices[0] else "#ef4444"
+    last = prices[-1]
+    change = last - base
+    pct_change = (change / base * 100.0) if base != 0 else 0.0
 
-    fig = px.line(df, x="time", y="price", title=f"{symbol} chart")
+    line_color = "#22c55e" if last >= base else "#ef4444"
+
+    fig = px.line(df, x="time", y="price")  # no title, name is in st.metric
     fig.update_traces(line=dict(color=line_color, width=2))
     fig.update_layout(
         height=160,
-        margin=dict(l=6, r=6, t=24, b=6),
+        margin=dict(l=6, r=6, t=12, b=6),
         xaxis_title=None,
         yaxis_title=None,
         showlegend=False,
@@ -392,7 +404,7 @@ def futures_chart(symbol: str):
     )
     fig.update_xaxes(showgrid=False, visible=False)
     fig.update_yaxes(showgrid=True, gridcolor="rgba(148,163,184,0.12)")
-    return fig, prices[-1]
+    return fig, last, change, pct_change
 
 
 def daily_calendar_agg(trades_df: pd.DataFrame):
@@ -564,32 +576,41 @@ with tab_dashboard:
     m_avg.metric("Avg Trade", format_money(metrics["avg_trade"]))
 
     st.markdown("### Futures")
+    st.button("Refresh futures prices")  # click → script reruns, data regenerates
 
-    # Refresh button for prices/charts (re-runs app)
-if st.button("Refresh futures prices"):
-    # No explicit rerun needed; Streamlit reruns the script on button click.
-    pass
+    fc1, fc2, fc3, fc4 = st.columns(4)
 
-    fc1, fc2, fc3 = st.columns(3)
-    futures_last = {}
-
+    # ES
     with fc1:
-        fig_es, last_es = futures_chart("ES")
-        st.metric("ES", f"{last_es:,.1f}")
+        fig_es, last_es, ch_es, pct_es = futures_chart("ES")
+        name = FUTURES_NAMES["ES"]
+        delta_text = f"{ch_es:+.1f} ({pct_es:+.2f}%)"
+        st.metric(name, f"{last_es:,.1f}", delta_text)
         st.plotly_chart(fig_es, use_container_width=True)
-        futures_last["ES"] = last_es
 
+    # NQ
     with fc2:
-        fig_nq, last_nq = futures_chart("NQ")
-        st.metric("NQ", f"{last_nq:,.1f}")
+        fig_nq, last_nq, ch_nq, pct_nq = futures_chart("NQ")
+        name = FUTURES_NAMES["NQ"]
+        delta_text = f"{ch_nq:+.1f} ({pct_nq:+.2f}%)"
+        st.metric(name, f"{last_nq:,.1f}", delta_text)
         st.plotly_chart(fig_nq, use_container_width=True)
-        futures_last["NQ"] = last_nq
 
+    # RTY
     with fc3:
-        fig_rty, last_rty = futures_chart("RTY")
-        st.metric("RTY", f"{last_rty:,.1f}")
+        fig_rty, last_rty, ch_rty, pct_rty = futures_chart("RTY")
+        name = FUTURES_NAMES["RTY"]
+        delta_text = f"{ch_rty:+.1f} ({pct_rty:+.2f}%)"
+        st.metric(name, f"{last_rty:,.1f}", delta_text)
         st.plotly_chart(fig_rty, use_container_width=True)
-        futures_last["RTY"] = last_rty
+
+    # VIX
+    with fc4:
+        fig_vix, last_vix, ch_vix, pct_vix = futures_chart("VIX")
+        name = FUTURES_NAMES["VIX"]
+        delta_text = f"{ch_vix:+.2f} ({pct_vix:+.2f}%)"
+        st.metric(name, f"{last_vix:,.2f}", delta_text)
+        st.plotly_chart(fig_vix, use_container_width=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -615,6 +636,24 @@ if st.button("Refresh futures prices"):
 # =========================
 with tab_trades:
     st.subheader("Trades")
+
+    # --- File upload from trading platform ---
+    st.markdown("### Upload trades from platform")
+    uploaded_file = st.file_uploader(
+        "Upload CSV export from your trading platform",
+        type=["csv"],
+        key="trades_upload"
+    )
+
+    uploaded_df = None
+    if uploaded_file is not None:
+        try:
+            uploaded_df = pd.read_csv(uploaded_file)
+            st.success(f"Loaded {len(uploaded_df)} rows from {uploaded_file.name}")
+            st.dataframe(uploaded_df.head(), use_container_width=True, height=240)
+            st.info("Mapping + Supabase insert can be wired here once we lock the exact broker export format.")
+        except Exception as e:
+            st.error(f"Could not read uploaded file: {e}")
 
     st.markdown("### Manual entry")
     selected_trade_id = None
