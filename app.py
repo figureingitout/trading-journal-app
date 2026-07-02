@@ -566,8 +566,9 @@ with tab_dashboard:
     st.markdown("### Futures")
 
     # Refresh button for prices/charts (re-runs app)
-    if st.button("Refresh futures prices"):
-        st.experimental_rerun()
+if st.button("Refresh futures prices"):
+    # No explicit rerun needed; Streamlit reruns the script on button click.
+    pass
 
     fc1, fc2, fc3 = st.columns(3)
     futures_last = {}
