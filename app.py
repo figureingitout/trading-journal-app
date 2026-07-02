@@ -326,24 +326,64 @@ def get_chart_dimensions():
     return {"height": 95}
 
 
-def render_quote_and_chart_card(symbol, quote_data, intraday_df):
-    dims = get_chart_dimensions()
-    card = st.container()
-    with card:
-        col_price, col_chart = st.columns([1.2, 1.8])
-        with col_price:
-            if quote_data["price"] is None:
-                st.metric(symbol, "N/A", "Unavailable")
-            else:
-                delta_text = (
-                    f"{quote_data['change']:+.2f} ({quote_data['change_pct']:+.2f}%)"
-                    if quote_data["change"] is not None
-                    else "N/A"
-                )
-                st.metric(symbol, f"{quote_data['price']:.2f}", delta_text)
+FUTURE_NAMES = {
+    "ES": "E-mini S&P 500",
+    "NQ": "E-mini Nasdaq-100",
+    "YM": "Dow Jones Futures",
+    "RTY": "Russell 2000 Futures",
+    "^VIX": "CBOE Volatility Index",
+    "SPY": "S&P 500 ETF",
+    "QQQ": "Nasdaq-100 ETF",
+    "DIA": "Dow Jones ETF",
+    "IWM": "Russell 2000 ETF",
+}
 
-        with col_chart:
+
+def pretty_symbol_label(symbol: str) -> str:
+    name = FUTURE_NAMES.get(symbol, "")
+    return f"{symbol} – {name}" if name else symbol
+
+
+def render_quote_row(symbol, quote_data):
+    label = pretty_symbol_label(symbol)
+    if quote_data["price"] is None:
+        st.metric(label, "N/A", "Unavailable")
+    else:
+        delta_text = (
+            f"{quote_data['change']:+.2f} ({quote_data['change_pct']:+.2f}%)"
+            if quote_data["change"] is not None
+            else "N/A"
+        )
+        st.metric(label, f"{quote_data['price']:.2f}", delta_text)
+
+
+def render_market_section(market_quotes, watch_quotes):
+    st.subheader("Market Overview")
+
+    col_left, col_right = st.columns(2)
+    with col_left:
+        st.markdown("#### Benchmarks")
+        for q in market_quotes:
+            render_quote_row(q["symbol"], q)
+    with col_right:
+        st.markdown("#### Watchlist Movers")
+        if watch_quotes:
+            for q in watch_quotes:
+                render_quote_row(q["symbol"], q)
+        else:
+            st.info("Add watchlist symbols to see them here.")
+
+    st.markdown("---")
+    st.markdown("### Mini Charts")
+    dims = get_chart_dimensions()
+    # Benchmarks charts
+    st.markdown("#### Benchmarks – Mini Charts")
+    bench_cols = st.columns(len(market_quotes)) if market_quotes else []
+    for col, q in zip(bench_cols, market_quotes):
+        with col:
+            intraday_df = fetch_intraday(q["symbol"], period="10d", interval="30m")
             if intraday_df.empty:
+                st.caption(pretty_symbol_label(q["symbol"]))
                 st.caption("No chart data")
             else:
                 fig = go.Figure()
@@ -356,7 +396,8 @@ def render_quote_and_chart_card(symbol, quote_data, intraday_df):
                     hoverinfo="skip"
                 ))
                 fig.update_layout(
-                    margin=dict(l=0, r=0, t=0, b=0),
+                    title=pretty_symbol_label(q["symbol"]),
+                    margin=dict(l=0, r=0, t=20, b=0),
                     height=dims["height"],
                     template="plotly_dark",
                     showlegend=False,
@@ -366,20 +407,37 @@ def render_quote_and_chart_card(symbol, quote_data, intraday_df):
                 )
                 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-
-def render_market_grid(quotes, title):
-    if not quotes:
-        st.info(f"No symbols available for {title}.")
-        return
-    st.markdown(f"### {title}")
-    cols_per_row = 3
-    for i in range(0, len(quotes), cols_per_row):
-        row_quotes = quotes[i:i + cols_per_row]
-        row_cols = st.columns(len(row_quotes))
-        for col, q in zip(row_cols, row_quotes):
+    # Watchlist charts
+    if watch_quotes:
+        st.markdown("#### Watchlist – Mini Charts")
+        watch_cols = st.columns(len(watch_quotes))
+        for col, q in zip(watch_cols, watch_quotes):
             with col:
                 intraday_df = fetch_intraday(q["symbol"], period="10d", interval="30m")
-                render_quote_and_chart_card(q["symbol"], q, intraday_df)
+                if intraday_df.empty:
+                    st.caption(pretty_symbol_label(q["symbol"]))
+                    st.caption("No chart data")
+                else:
+                    fig = go.Figure()
+                    line_color = "#22c55e" if intraday_df["Close"].iloc[-1] >= intraday_df["Close"].iloc[0] else "#ef4444"
+                    fig.add_trace(go.Scatter(
+                        x=intraday_df.index,
+                        y=intraday_df["Close"],
+                        mode="lines",
+                        line=dict(color=line_color, width=1.6),
+                        hoverinfo="skip"
+                    ))
+                    fig.update_layout(
+                        title=pretty_symbol_label(q["symbol"]),
+                        margin=dict(l=0, r=0, t=20, b=0),
+                        height=dims["height"],
+                        template="plotly_dark",
+                        showlegend=False,
+                        xaxis=dict(visible=False, fixedrange=True),
+                        yaxis=dict(visible=False, fixedrange=True),
+                        hovermode=False
+                    )
+                    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
 # ---------- AI PROVIDER ----------
@@ -484,8 +542,12 @@ def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
 
             qty_val = float(row[qty_col]) if qty_col and pd.notna(row[qty_col]) else 0.0
             entry_val = float(row[entry_col]) if entry_col and pd.notna(row[entry_col]) else 0.0
-            exit_val = float(row[exit_col]) if exit_col and pd.notna(row[exit_col]) else entry_val
+            exit_val = float(row[exit_col]) if exit_col and pd.notna[row[exit_col]] else entry_val
 
+        except Exception:
+            exit_val = entry_val
+
+        try:
             if gross_col and pd.notna(row[gross_col]):
                 gross_val = float(row[gross_col])
             else:
@@ -548,31 +610,34 @@ def import_trades(user_id, df_norm):
 
 # ---------- CALENDAR & PERFORMANCE ----------
 
-def render_calendar(day_df, selected_year, selected_month):
+def render_calendar_grid(daily_df, year, month):
     cal = calendar.Calendar(firstweekday=6)
-    weeks = cal.monthdayscalendar(selected_year, selected_month)
+    weeks = cal.monthdayscalendar(year, month)
+    month_name = calendar.month_name[month]
+
+    st.markdown(f"### {month_name} {year} calendar view")
 
     st.markdown("""
     <style>
     .calendar-grid {display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-top:10px;}
     .calendar-head {font-weight:700;text-align:center;padding:6px 0;}
     .day-tile {
-        border-radius:12px;
-        padding:10px;
-        min-height:110px;
+        border-radius:10px;
+        padding:8px;
+        min-height:90px;
         color:white;
-        font-size:0.85rem;
+        font-size:0.8rem;
         display:flex;
         flex-direction:column;
         justify-content:space-between;
     }
     .day-empty {
-        background:#1e293b;
-        border-radius:12px;
-        min-height:110px;
+        background:#1f2933;
+        border-radius:10px;
+        min-height:90px;
     }
-    .day-num {font-weight:700;font-size:0.95rem;}
-    .small {font-size:0.75rem;opacity:0.95;}
+    .day-num {font-weight:700;font-size:0.9rem;}
+    .small {font-size:0.7rem;opacity:0.95;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -586,8 +651,8 @@ def render_calendar(day_df, selected_year, selected_month):
             if day == 0:
                 tiles += '<div class="day-empty"></div>'
             else:
-                date_key = f"{selected_year:04d}-{selected_month:02d}-{day:02d}"
-                row = day_df[day_df["date"] == date_key]
+                date_key = f"{year:04d}-{month:02d}-{day:02d}"
+                row = daily_df[daily_df["date"] == date_key]
                 if not row.empty:
                     pnl = float(row["daily_net_pnl"].iloc[0])
                     pct = float(row["daily_pct"].iloc[0])
@@ -598,7 +663,7 @@ def render_calendar(day_df, selected_year, selected_month):
                     plan_text = "Plan ✓" if followed_ratio >= 1 else "Plan ✗" if followed_ratio == 0 else "Plan Mixed"
 
                     tiles += f"""
-                    <div class="day-tile" style="background:{bg}; border:3px solid {border};">
+                    <div class="day-tile" style="background:{bg}; border:2px solid {border};">
                         <div class="day-num">{day}</div>
                         <div>
                             <div><strong>${pnl:,.2f}</strong></div>
@@ -609,7 +674,7 @@ def render_calendar(day_df, selected_year, selected_month):
                     """
                 else:
                     tiles += f"""
-                    <div class="day-tile" style="background:#334155; border:3px solid #1f2937;">
+                    <div class="day-tile" style="background:#334155; border:2px solid #1f2937;">
                         <div class="day-num">{day}</div>
                         <div class="small">No trades</div>
                         <div class="small">-</div>
@@ -627,11 +692,11 @@ def build_performance_vs_market_chart(daily_df, mode="Futures"):
     perf["your_return_pct"] = (perf["cum_net_pnl"] / max(abs(perf["daily_net_pnl"]).sum(), 1)) * 100
 
     if mode == "Futures":
-        symbols = ["MES=F", "MNQ=F", "MYM=F"]
-        labels = ["MES", "MNQ", "MYM"]
+        symbols = ["ES", "NQ", "YM", "RTY"]
+        labels = ["ES", "NQ", "YM", "RTY"]
     else:
-        symbols = ["SPY", "QQQ", "DIA"]
-        labels = ["SPY", "QQQ", "DIA"]
+        symbols = ["SPY", "QQQ", "DIA", "IWM"]
+        labels = ["SPY", "QQQ", "DIA", "IWM"]
 
     index_returns = {}
     for sym, label in zip(symbols, labels):
@@ -844,7 +909,7 @@ except Exception:
     df_watch_for_top = pd.DataFrame()
 
 if st.session_state.benchmark_mode == "Futures":
-    market_symbols = ["MES=F", "MNQ=F", "MYM=F", "M2K=F", "^VIX"]
+    market_symbols = ["ES", "NQ", "YM", "RTY", "^VIX"]
 else:
     market_symbols = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
 
@@ -864,13 +929,7 @@ if not df_watch_for_top.empty and "ticker" in df_watch_for_top.columns:
 
 watch_quotes = fetch_quotes(watch_symbols) if watch_symbols else []
 
-st.subheader("Market Overview")
-render_market_grid(market_quotes, "Benchmarks")
-
-if watch_quotes:
-    render_market_grid(watch_quotes, "Watchlist Movers")
-else:
-    st.info("Add some watchlist symbols to show their price action here.")
+render_market_section(market_quotes, watch_quotes)
 
 st.markdown("---")
 
@@ -950,7 +1009,49 @@ with strategy_tab:
 # --- Trades ---
 
 with trade_tab:
+    st.subheader("Trades")
+
+    # Bulk import ON TOP
+    st.markdown("### Bulk Import Trades from Broker (CSV or Excel)")
+    uploaded_file = st.file_uploader(
+        "Upload trade history",
+        type=["csv", "xls", "xlsx"],
+        help="Upload exported order/trade history from your broker or exchange."
+    )
+
+    if uploaded_file is not None:
+        ext = uploaded_file.name.split(".")[-1].lower()
+        try:
+            if ext == "csv":
+                df_raw = pd.read_csv(uploaded_file)
+            else:
+                df_raw = pd.read_excel(uploaded_file)
+        except Exception as e:
+            df_raw = None
+            st.error(f"Could not read file: {e}")
+
+        if df_raw is not None:
+            st.write("Uploaded file preview:")
+            st.dataframe(df_raw.head(), use_container_width=True)
+
+            df_norm = normalize_broker_df(df_raw)
+            if df_norm.empty:
+                st.warning("No trades could be mapped from this file.")
+            else:
+                st.write("Mapped trades preview:")
+                st.dataframe(df_norm.head(), use_container_width=True)
+
+                if st.button("Import all mapped trades"):
+                    try:
+                        import_trades(st.session_state.user_id, df_norm)
+                        st.success(f"Imported {len(df_norm)} trades.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Import failed: {e}")
+
+    st.markdown("---")
     st.subheader("Log a Trade (Manual)")
+
     try:
         df_strategy_names = get_strategies_df(st.session_state.user_id)
         user_strategy_names = sorted(df_strategy_names["name"].dropna().tolist()) if not df_strategy_names.empty else []
@@ -1003,44 +1104,6 @@ with trade_tab:
                 st.rerun()
             except Exception as e:
                 st.error(f"Could not save trade: {e}")
-
-    st.markdown("---")
-    st.subheader("Bulk Import Trades from Broker (CSV or Excel)")
-    uploaded_file = st.file_uploader(
-        "Upload trade history",
-        type=["csv", "xls", "xlsx"],
-        help="Upload exported order/trade history from your broker or exchange."
-    )
-
-    if uploaded_file is not None:
-        ext = uploaded_file.name.split(".")[-1].lower()
-        try:
-            if ext == "csv":
-                df_raw = pd.read_csv(uploaded_file)
-            else:
-                df_raw = pd.read_excel(uploaded_file)
-        except Exception as e:
-            df_raw = None
-            st.error(f"Could not read file: {e}")
-
-        if df_raw is not None:
-            st.write("Uploaded file preview:")
-            st.dataframe(df_raw.head(), use_container_width=True)
-
-            df_norm = normalize_broker_df(df_raw)
-            if df_norm.empty:
-                st.warning("No trades could be mapped from this file.")
-            else:
-                st.write("Mapped trades preview:")
-                st.dataframe(df_norm.head(), use_container_width=True)
-
-                if st.button("Import all mapped trades"):
-                    try:
-                        import_trades(st.session_state.user_id, df_norm)
-                        st.success(f"Imported {len(df_norm)} trades.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Import failed: {e}")
 
     try:
         df_trades = get_trades_df(st.session_state.user_id)
@@ -1153,7 +1216,8 @@ with analytics_tab:
 # --- Calendar ---
 
 with calendar_tab:
-    st.subheader("Calendar View")
+    st.subheader("Calendar")
+
     try:
         df_cal = get_trades_df(st.session_state.user_id)
     except Exception as e:
@@ -1161,9 +1225,9 @@ with calendar_tab:
         st.error(f"Could not load calendar data: {e}")
 
     today = datetime.date.today()
-    c1, c2 = st.columns(2)
-    selected_year = c1.selectbox("Year", list(range(today.year - 2, today.year + 3)), index=2)
-    selected_month = c2.selectbox("Month", list(range(1, 13)), index=today.month - 1)
+    col_sel_year, col_sel_month = st.columns(2)
+    selected_year = col_sel_year.selectbox("Year", list(range(today.year - 2, today.year + 3)), index=2)
+    selected_month = col_sel_month.selectbox("Month", list(range(1, 13)), index=today.month - 1)
 
     account_size = st.number_input(
         "Account Size ($) for % calendar",
@@ -1181,7 +1245,8 @@ with calendar_tab:
             follow_ratio=("followed_plan", "mean")
         ).reset_index().rename(columns={"date_str": "date"})
         daily["daily_pct"] = (daily["daily_net_pnl"] / account_size) * 100
-        render_calendar(daily, selected_year, selected_month)
+
+        render_calendar_grid(daily, selected_year, selected_month)
 
         st.subheader("Daily Summary")
         month_df = daily[daily["date"].str.startswith(f"{selected_year:04d}-{selected_month:02d}")]
