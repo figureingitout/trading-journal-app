@@ -128,7 +128,8 @@ WATCHLIST_COLUMNS = [
     "catalyst", "status", "created_at"
 ]
 
-FUTURES_SYMBOLS_DEFAULT = ["ES", "NQ"]
+# ES, NQ, RTY (Russell 2000 futures)
+FUTURES_SYMBOLS_DEFAULT = ["ES", "NQ", "RTY"]
 
 US_MARKET_OPEN_ET = time(9, 30)
 US_MARKET_CLOSE_ET = time(16, 0)
@@ -352,16 +353,17 @@ def setup_pnl_chart(df: pd.DataFrame):
     return fig
 
 
-def futures_chart(symbol: str):
+def generate_futures_series(symbol: str):
     idx = pd.date_range(
         end=pd.Timestamp.now(),
         periods=30,
-        freq=pd.Timedelta(hours=1)
+        freq=pd.Timedelta(minutes=10)
     )
 
     base_map = {
         "ES": 6200,
         "NQ": 22800,
+        "RTY": 2180,
     }
     base = base_map.get(symbol, 100)
 
@@ -369,13 +371,18 @@ def futures_chart(symbol: str):
     steps = np.random.normal(0, 1, len(idx))
     prices = base + np.cumsum(steps)
 
+    return idx, prices
+
+
+def futures_chart(symbol: str):
+    idx, prices = generate_futures_series(symbol)
     df = pd.DataFrame({"time": idx, "price": prices})
     line_color = "#22c55e" if prices[-1] >= prices[0] else "#ef4444"
 
     fig = px.line(df, x="time", y="price", title=f"{symbol} chart")
     fig.update_traces(line=dict(color=line_color, width=2))
     fig.update_layout(
-        height=140,
+        height=160,
         margin=dict(l=6, r=6, t=24, b=6),
         xaxis_title=None,
         yaxis_title=None,
@@ -385,7 +392,7 @@ def futures_chart(symbol: str):
     )
     fig.update_xaxes(showgrid=False, visible=False)
     fig.update_yaxes(showgrid=True, gridcolor="rgba(148,163,184,0.12)")
-    return fig
+    return fig, prices[-1]
 
 
 def daily_calendar_agg(trades_df: pd.DataFrame):
@@ -546,47 +553,61 @@ tab_dashboard, tab_trades, tab_watchlist, tab_calendar = st.tabs(
 with tab_dashboard:
     metrics = trades_metrics(trades_df)
 
-    # Left rail for futures charts, main dashboard content in center, tiny spacer on right
-    left_rail, main_col, right_spacer = st.columns([1, 4, 0.35])
+    # KPI order: Trades, Daily P&L, Net P&L, Gross P&L, Commissions, Win Rate, Avg Trade
+    m_trades, m_daily, m_net, m_gross, m_comm, m_win, m_avg = st.columns(7)
+    m_trades.metric("Trades", f"{metrics['trades']}")
+    m_daily.metric("Daily P&L", format_money(metrics["daily_pnl"]), f"{metrics['daily_pct']:+.2f}%")
+    m_net.metric("Net P&L", format_money(metrics["net_pnl"]), f"{metrics['net_pct']:+.2f}%")
+    m_gross.metric("Gross P&L", format_money(metrics["gross_pnl"]))
+    m_comm.metric("Commissions", format_money(metrics["commissions"]))
+    m_win.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
+    m_avg.metric("Avg Trade", format_money(metrics["avg_trade"]))
 
-    with left_rail:
-        st.markdown("#### Futures charts")
-        for sym in FUTURES_SYMBOLS_DEFAULT:
-            fig = futures_chart(sym)
-            st.plotly_chart(fig, use_container_width=True)
+    st.markdown("### Futures")
 
-    with main_col:
-        # KPI order: Trades, Daily P&L, Net P&L, Gross P&L, Commissions, Win Rate, Avg Trade
-        m_trades, m_daily, m_net, m_gross, m_comm, m_win, m_avg = st.columns(7)
-        m_trades.metric("Trades", f"{metrics['trades']}")
-        m_daily.metric("Daily P&L", format_money(metrics["daily_pnl"]), f"{metrics['daily_pct']:+.2f}%")
-        m_net.metric("Net P&L", format_money(metrics["net_pnl"]), f"{metrics['net_pct']:+.2f}%")
-        m_gross.metric("Gross P&L", format_money(metrics["gross_pnl"]))
-        m_comm.metric("Commissions", format_money(metrics["commissions"]))
-        m_win.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
-        m_avg.metric("Avg Trade", format_money(metrics["avg_trade"]))
+    # Refresh button for prices/charts (re-runs app)
+    if st.button("Refresh futures prices"):
+        st.experimental_rerun()
 
-        c1, c2 = st.columns(2)
-        with c1:
-            fig_eq = equity_curve_chart(trades_df)
-            if fig_eq:
-                st.plotly_chart(fig_eq, use_container_width=True)
-            else:
-                st.info("Nothing here yet. Add a trade to get started.")
+    fc1, fc2, fc3 = st.columns(3)
+    futures_last = {}
 
-        with c2:
-            fig_month = monthly_pnl_chart(trades_df)
-            if fig_month:
-                st.plotly_chart(fig_month, use_container_width=True)
-            else:
-                st.info("Nothing here yet. Add a trade to get started.")
+    with fc1:
+        fig_es, last_es = futures_chart("ES")
+        st.metric("ES", f"{last_es:,.1f}")
+        st.plotly_chart(fig_es, use_container_width=True)
+        futures_last["ES"] = last_es
 
-        fig_setup = setup_pnl_chart(trades_df)
-        if fig_setup:
-            st.plotly_chart(fig_setup, use_container_width=True)
+    with fc2:
+        fig_nq, last_nq = futures_chart("NQ")
+        st.metric("NQ", f"{last_nq:,.1f}")
+        st.plotly_chart(fig_nq, use_container_width=True)
+        futures_last["NQ"] = last_nq
 
-    with right_spacer:
-        st.empty()
+    with fc3:
+        fig_rty, last_rty = futures_chart("RTY")
+        st.metric("RTY", f"{last_rty:,.1f}")
+        st.plotly_chart(fig_rty, use_container_width=True)
+        futures_last["RTY"] = last_rty
+
+    c1, c2 = st.columns(2)
+    with c1:
+        fig_eq = equity_curve_chart(trades_df)
+        if fig_eq:
+            st.plotly_chart(fig_eq, use_container_width=True)
+        else:
+            st.info("Nothing here yet. Add a trade to get started.")
+
+    with c2:
+        fig_month = monthly_pnl_chart(trades_df)
+        if fig_month:
+            st.plotly_chart(fig_month, use_container_width=True)
+        else:
+            st.info("Nothing here yet. Add a trade to get started.")
+
+    fig_setup = setup_pnl_chart(trades_df)
+    if fig_setup:
+        st.plotly_chart(fig_setup, use_container_width=True)
 
 # =========================
 # Trades
