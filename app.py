@@ -1,11 +1,8 @@
-"""
-Personal Trading Journal App
-Run: streamlit run app.py
-"""
 import streamlit as st
 import sqlite3
 import pandas as pd
 import datetime
+import requests
 
 DB_PATH = "trading_journal.db"
 
@@ -39,20 +36,38 @@ def add_watchlist(ticker, reason):
     conn.commit()
     conn.close()
 
+def ask_perplexity(prompt, api_key, model="sonar"):
+    url = "https://api.perplexity.ai/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a helpful trading research assistant. Be concise and cite sources when possible."},
+            {"role": "user", "content": prompt}
+        ]
+    }
+    response = requests.post(url, headers=headers, json=payload, timeout=60)
+    response.raise_for_status()
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
+
 st.set_page_config(page_title="My Trading Journal", layout="wide")
 st.title("📈 My Trading Journal")
 
-tab1, tab2, tab3, tab4 = st.tabs(["Activity Log", "Trades", "Watchlist", "Analytics"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Activity Log", "Trades", "Watchlist", "Analytics", "Ask Perplexity"])
 
 with tab1:
     st.subheader("Log a Research / Chat Activity")
     with st.form("activity_form", clear_on_submit=True):
         category = st.selectbox("Category", ["App Research", "Strategy", "News", "Question", "Other"])
-        request = st.text_input("What did you ask / work on?")
+        request_text = st.text_input("What did you ask / work on?")
         outcome = st.text_area("Outcome / Answer summary")
         notes = st.text_area("Notes")
         if st.form_submit_button("Save Entry"):
-            log_activity(category, request, outcome, notes)
+            log_activity(category, request_text, outcome, notes)
             st.success("Logged!")
 
     conn = get_conn()
@@ -108,3 +123,40 @@ with tab4:
         st.bar_chart(df_trades.set_index("ticker")["pnl"])
     else:
         st.info("Log some trades to see analytics.")
+
+with tab5:
+    st.subheader("💬 Ask Perplexity")
+    st.caption("Ask research questions, get market news, or analyze your trading setups — powered by Perplexity AI.")
+
+    if "pplx_history" not in st.session_state:
+        st.session_state.pplx_history = []
+
+    try:
+        api_key = st.secrets["PERPLEXITY_API_KEY"]
+        key_missing = False
+    except Exception:
+        api_key = None
+        key_missing = True
+
+    if key_missing:
+        st.warning("No Perplexity API key found. Add PERPLEXITY_API_KEY in your Streamlit app's Secrets settings.")
+    else:
+        for msg in st.session_state.pplx_history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        user_input = st.chat_input("Ask Perplexity about a stock, strategy, or news...")
+        if user_input:
+            st.session_state.pplx_history.append({"role": "user", "content": user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Researching..."):
+                    try:
+                        answer = ask_perplexity(user_input, api_key)
+                        st.markdown(answer)
+                        st.session_state.pplx_history.append({"role": "assistant", "content": answer})
+                        log_activity("Perplexity Chat", user_input, answer[:300], "Auto-logged from Ask Perplexity tab")
+                    except Exception as e:
+                        st.error(f"Error calling Perplexity API: {e}")
