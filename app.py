@@ -5,6 +5,7 @@ import datetime
 import requests
 import hashlib
 import re
+import calendar
 
 DB_PATH = "trading_journal.db"
 
@@ -44,14 +45,20 @@ def init_db():
     """)
 
     c.execute("""
-    CREATE TABLE IF NOT EXISTS activity_log (
+    CREATE TABLE IF NOT EXISTS strategies (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
-        timestamp TEXT,
-        category TEXT,
-        request TEXT,
-        outcome TEXT,
+        name TEXT NOT NULL,
+        market_type TEXT,
+        setup_type TEXT,
+        time_of_day TEXT,
+        market_conditions TEXT,
+        entry_criteria TEXT,
+        exit_criteria TEXT,
+        risk_rules TEXT,
+        checklist TEXT,
         notes TEXT,
+        created_at TEXT NOT NULL,
         FOREIGN KEY(user_id) REFERENCES users(id)
     )
     """)
@@ -61,13 +68,17 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         date TEXT,
+        entry_time TEXT,
+        exit_time TEXT,
         ticker TEXT,
         side TEXT,
         quantity REAL,
         entry_price REAL,
         exit_price REAL,
         pnl REAL,
+        percent_gain REAL,
         strategy TEXT,
+        followed_plan INTEGER DEFAULT 1,
         notes TEXT,
         FOREIGN KEY(user_id) REFERENCES users(id)
     )
@@ -87,6 +98,11 @@ def init_db():
     add_column_if_missing(conn, "users", "email", "TEXT")
     add_column_if_missing(conn, "users", "marketing_opt_in", "INTEGER DEFAULT 0")
     add_column_if_missing(conn, "users", "created_at", "TEXT")
+
+    add_column_if_missing(conn, "trades", "entry_time", "TEXT")
+    add_column_if_missing(conn, "trades", "exit_time", "TEXT")
+    add_column_if_missing(conn, "trades", "percent_gain", "REAL")
+    add_column_if_missing(conn, "trades", "followed_plan", "INTEGER DEFAULT 1")
 
     conn.commit()
     conn.close()
@@ -141,24 +157,60 @@ def authenticate_user(login_value: str, password: str):
     return row
 
 
-def log_activity(user_id, category, request, outcome, notes=""):
+def compute_percent_gain(side, entry_price, exit_price):
+    if entry_price in (0, None):
+        return 0.0
+    try:
+        if side == "Long":
+            return ((exit_price - entry_price) / entry_price) * 100
+        else:
+            return ((entry_price - exit_price) / entry_price) * 100
+    except Exception:
+        return 0.0
+
+
+def add_strategy(user_id, name, market_type, setup_type, time_of_day, market_conditions,
+                 entry_criteria, exit_criteria, risk_rules, checklist, notes):
     conn = get_conn()
     conn.execute(
-        "INSERT INTO activity_log (user_id, timestamp, category, request, outcome, notes) VALUES (?,?,?,?,?,?)",
-        (user_id, datetime.datetime.now().isoformat(), category, request, outcome, notes)
+        """
+        INSERT INTO strategies (
+            user_id, name, market_type, setup_type, time_of_day, market_conditions,
+            entry_criteria, exit_criteria, risk_rules, checklist, notes, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id, name, market_type, setup_type, time_of_day, market_conditions,
+            entry_criteria, exit_criteria, risk_rules, checklist, notes,
+            datetime.datetime.now().isoformat()
+        )
     )
     conn.commit()
     conn.close()
 
 
-def log_trade(user_id, date, ticker, side, qty, entry, exitp, pnl, strategy, notes):
+def log_trade(user_id, date, entry_time, exit_time, ticker, side, qty, entry, exitp, strategy, followed_plan, notes):
+    pnl = (exitp - entry) * qty if side == "Long" else (entry - exitp) * qty
+    percent_gain = compute_percent_gain(side, entry, exitp)
+
     conn = get_conn()
     conn.execute(
-        "INSERT INTO trades (user_id, date, ticker, side, quantity, entry_price, exit_price, pnl, strategy, notes) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (user_id, date, ticker, side, qty, entry, exitp, pnl, strategy, notes)
+        """
+        INSERT INTO trades (
+            user_id, date, entry_time, exit_time, ticker, side, quantity,
+            entry_price, exit_price, pnl, percent_gain, strategy, followed_plan, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id, date, entry_time, exit_time, ticker, side, qty,
+            entry, exitp, pnl, percent_gain, strategy, 1 if followed_plan else 0, notes
+        )
     )
     conn.commit()
     conn.close()
+    return pnl, percent_gain
 
 
 def add_watchlist(user_id, ticker, reason):
@@ -218,7 +270,9 @@ def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
                 return lower_cols[cand.lower()]
         return None
 
-    date_col = pick("date", "time", "timestamp", "trade_date", "open_time", "filled time", "execution time")
+    date_col = pick("date", "time", "timestamp", "trade_date", "filled time", "execution time")
+    entry_time_col = pick("entry_time", "time", "timestamp", "filled time", "execution time")
+    exit_time_col = pick("exit_time", "close time")
     symbol_col = pick("symbol", "ticker", "instrument", "product", "asset", "market")
     side_col = pick("side", "buy_sell", "direction", "type", "action")
     qty_col = pick("quantity", "qty", "size", "amount", "contracts", "shares")
@@ -231,12 +285,28 @@ def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, row in df.iterrows():
         try:
-            date_val = row[date_col] if date_col else datetime.date.today().isoformat()
+            dt = row[date_col] if date_col else datetime.date.today().isoformat()
             try:
-                date_parsed = pd.to_datetime(date_val)
-                date_str = date_parsed.date().isoformat()
+                parsed_dt = pd.to_datetime(dt)
+                date_str = parsed_dt.date().isoformat()
+                time_str = parsed_dt.strftime("%H:%M")
             except Exception:
-                date_str = str(date_val)
+                date_str = str(dt)
+                time_str = ""
+
+            entry_time = time_str
+            if entry_time_col and pd.notna(row[entry_time_col]):
+                try:
+                    entry_time = pd.to_datetime(row[entry_time_col]).strftime("%H:%M")
+                except Exception:
+                    entry_time = str(row[entry_time_col])
+
+            exit_time = ""
+            if exit_time_col and pd.notna(row[exit_time_col]):
+                try:
+                    exit_time = pd.to_datetime(row[exit_time_col]).strftime("%H:%M")
+                except Exception:
+                    exit_time = str(row[exit_time_col])
 
             ticker_val = str(row[symbol_col]).upper().strip() if symbol_col else ""
             side_raw = str(row[side_col]).strip().lower() if side_col else ""
@@ -256,25 +326,105 @@ def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
             else:
                 pnl_val = (exit_val - entry_val) * qty_val if side_val == "Long" else (entry_val - exit_val) * qty_val
 
+            percent_val = compute_percent_gain(side_val, entry_val, exit_val)
             strategy_val = str(row[strategy_col]).strip() if strategy_col and pd.notna(row[strategy_col]) else ""
             notes_val = str(row[notes_col]).strip() if notes_col and pd.notna(row[notes_col]) else ""
 
             if ticker_val:
                 rows.append({
                     "date": date_str,
+                    "entry_time": entry_time,
+                    "exit_time": exit_time,
                     "ticker": ticker_val,
                     "side": side_val,
                     "quantity": qty_val,
                     "entry_price": entry_val,
                     "exit_price": exit_val,
                     "pnl": pnl_val,
+                    "percent_gain": percent_val,
                     "strategy": strategy_val,
+                    "followed_plan": 1,
                     "notes": notes_val,
                 })
         except Exception:
             continue
 
     return pd.DataFrame(rows)
+
+
+def render_calendar(day_df, selected_year, selected_month):
+    cal = calendar.Calendar(firstweekday=6)
+    weeks = cal.monthdayscalendar(selected_year, selected_month)
+
+    st.markdown("""
+    <style>
+    .calendar-grid {display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-top:10px;}
+    .calendar-head {font-weight:700;text-align:center;padding:6px 0;}
+    .day-tile {
+        border-radius:12px;
+        padding:10px;
+        min-height:110px;
+        color:white;
+        font-size:0.85rem;
+        display:flex;
+        flex-direction:column;
+        justify-content:space-between;
+    }
+    .day-empty {
+        background:#f0f0f0;
+        border-radius:12px;
+        min-height:110px;
+    }
+    .day-num {font-weight:700;font-size:0.95rem;}
+    .small {font-size:0.75rem;opacity:0.95;}
+    </style>
+    """, unsafe_allow_html=True)
+
+    for name in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
+        pass
+
+    header_html = '<div class="calendar-grid">' + "".join(
+        [f'<div class="calendar-head">{d}</div>' for d in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]]
+    )
+
+    tiles = ""
+    for week in weeks:
+        for day in week:
+            if day == 0:
+                tiles += '<div class="day-empty"></div>'
+            else:
+                date_key = f"{selected_year:04d}-{selected_month:02d}-{day:02d}"
+                row = day_df[day_df["date"] == date_key]
+                if not row.empty:
+                    pnl = float(row["daily_pnl"].iloc[0])
+                    pct = float(row["daily_pct"].iloc[0])
+                    followed_ratio = float(row["follow_ratio"].iloc[0])
+
+                    bg = "#1f7a1f" if pnl > 0 else "#b42318" if pnl < 0 else "#6b7280"
+                    border = "#22c55e" if followed_ratio >= 1 else "#ef4444" if followed_ratio == 0 else "#f59e0b"
+                    plan_text = "Plan ✓" if followed_ratio >= 1 else "Plan ✗" if followed_ratio == 0 else "Plan Mixed"
+
+                    tiles += f"""
+                    <div class="day-tile" style="background:{bg}; border:4px solid {border};">
+                        <div class="day-num">{day}</div>
+                        <div>
+                            <div><strong>${pnl:,.2f}</strong></div>
+                            <div class="small">{pct:+.2f}%</div>
+                        </div>
+                        <div class="small">{plan_text}</div>
+                    </div>
+                    """
+                else:
+                    tiles += f"""
+                    <div class="day-tile" style="background:#9ca3af; border:4px solid #d1d5db;">
+                        <div class="day-num">{day}</div>
+                        <div class="small">No trades</div>
+                        <div class="small">-</div>
+                    </div>
+                    """
+
+    footer = "</div>"
+    st.markdown(header_html + tiles + footer, unsafe_allow_html=True)
 
 
 init_db()
@@ -347,6 +497,7 @@ if not st.session_state.logged_in:
 
 st.sidebar.success(f"Logged in as {st.session_state.username}")
 st.sidebar.caption(st.session_state.email if st.session_state.email else "")
+account_size = st.sidebar.number_input("Account Size ($) for % calendar", min_value=100.0, value=25000.0, step=100.0)
 
 if st.sidebar.button("Log out"):
     st.session_state.logged_in = False
@@ -357,53 +508,104 @@ if st.sidebar.button("Log out"):
     st.session_state.user_api_key = ""
     st.rerun()
 
-main_tab, trade_tab, watch_tab, analytics_tab, ai_tab = st.tabs([
-    "Activity Log", "Trades", "Watchlist", "Analytics", "AI Assistant"
+strategy_tab, trade_tab, watch_tab, analytics_tab, calendar_tab, ai_tab = st.tabs([
+    "My Strategy", "Trades", "Watchlist", "Analytics", "Calendar", "AI Assistant"
 ])
 
-with main_tab:
-    st.subheader("Log Research / Chat Activity")
-    with st.form("activity_form", clear_on_submit=True):
-        category = st.selectbox("Category", ["App Research", "Strategy", "News", "Question", "Other"])
-        request_text = st.text_input("What did you ask / work on?")
-        outcome = st.text_area("Outcome / Answer summary")
-        notes = st.text_area("Notes")
-        if st.form_submit_button("Save Entry"):
-            log_activity(st.session_state.user_id, category, request_text, outcome, notes)
-            st.success("Logged!")
+with strategy_tab:
+    st.subheader("My Strategy")
+    with st.form("strategy_form", clear_on_submit=True):
+        name = st.text_input("Strategy Name")
+        col1, col2, col3 = st.columns(3)
+        market_type = col1.selectbox("Market Type", ["Stocks", "Futures", "Crypto", "Forex", "Options", "Other"])
+        setup_type = col2.text_input("Setup Type")
+        time_of_day = col3.text_input("Best Time of Day")
+        market_conditions = st.text_area("Market Conditions")
+        entry_criteria = st.text_area("Entry Criteria")
+        exit_criteria = st.text_area("Exit Criteria")
+        risk_rules = st.text_area("Risk Rules")
+        checklist = st.text_area("Checklist")
+        notes = st.text_area("Extra Notes")
+        if st.form_submit_button("Save Strategy"):
+            if not name.strip():
+                st.error("Strategy name is required.")
+            else:
+                add_strategy(
+                    st.session_state.user_id, name, market_type, setup_type, time_of_day,
+                    market_conditions, entry_criteria, exit_criteria, risk_rules, checklist, notes
+                )
+                st.success("Strategy saved.")
 
     conn = get_conn()
-    df = pd.read_sql(
-        "SELECT timestamp, category, request, outcome, notes FROM activity_log WHERE user_id = ? ORDER BY id DESC",
+    df_strat = pd.read_sql(
+        """
+        SELECT name, market_type, setup_type, time_of_day, market_conditions,
+               entry_criteria, exit_criteria, risk_rules, checklist, notes
+        FROM strategies
+        WHERE user_id = ?
+        ORDER BY id DESC
+        """,
         conn,
         params=(st.session_state.user_id,)
     )
     conn.close()
-    st.dataframe(df, use_container_width=True)
+    st.subheader("Saved Strategies")
+    st.dataframe(df_strat, use_container_width=True)
 
 with trade_tab:
     st.subheader("Log a Trade (Manual)")
+    conn = get_conn()
+    user_strategy_names = pd.read_sql(
+        "SELECT name FROM strategies WHERE user_id = ? ORDER BY name",
+        conn,
+        params=(st.session_state.user_id,)
+    )["name"].tolist()
+    conn.close()
+
+    strategy_options = [""] + user_strategy_names if user_strategy_names else [""]
+
     with st.form("trade_form", clear_on_submit=True):
         col1, col2, col3 = st.columns(3)
         date = col1.date_input("Date", datetime.date.today())
-        ticker = col2.text_input("Ticker")
-        side = col3.selectbox("Side", ["Long", "Short"])
-        qty = col1.number_input("Quantity", min_value=0.0)
-        entry = col2.number_input("Entry Price", min_value=0.0)
-        exitp = col3.number_input("Exit Price", min_value=0.0)
-        strategy = st.text_input("Strategy / Setup")
+        entry_time = col2.time_input("Entry Time", value=datetime.datetime.now().time())
+        exit_time = col3.time_input("Exit Time", value=datetime.datetime.now().time())
+
+        col4, col5, col6 = st.columns(3)
+        ticker = col4.text_input("Ticker / Instrument")
+        side = col5.selectbox("Side", ["Long", "Short"])
+        qty = col6.number_input("Quantity", min_value=0.0)
+
+        col7, col8 = st.columns(2)
+        entry = col7.number_input("Entry Price", min_value=0.0)
+        exitp = col8.number_input("Exit Price", min_value=0.0)
+
+        strategy = st.selectbox("Linked Strategy", strategy_options)
+        followed_plan = st.checkbox("I followed my plan on this trade", value=True)
         notes = st.text_area("Trade Notes")
+
         if st.form_submit_button("Save Trade"):
-            pnl = (exitp - entry) * qty if side == "Long" else (entry - exitp) * qty
-            log_trade(st.session_state.user_id, str(date), ticker.upper(), side, qty, entry, exitp, pnl, strategy, notes)
-            st.success(f"Trade saved. P&L: ${pnl:,.2f}")
+            pnl, pct = log_trade(
+                st.session_state.user_id,
+                str(date),
+                entry_time.strftime("%H:%M"),
+                exit_time.strftime("%H:%M"),
+                ticker.upper(),
+                side,
+                qty,
+                entry,
+                exitp,
+                strategy,
+                followed_plan,
+                notes
+            )
+            st.success(f"Trade saved. P&L: ${pnl:,.2f} | Return: {pct:+.2f}%")
 
     st.markdown("---")
     st.subheader("Bulk Import Trades from Broker (CSV or Excel)")
     uploaded_file = st.file_uploader(
-        "Upload your trade history file",
+        "Upload trade history",
         type=["csv", "xls", "xlsx"],
-        help="Export your fills/order history from your broker or exchange and upload it here."
+        help="Upload exported order/trade history from your broker or exchange."
     )
 
     if uploaded_file is not None:
@@ -422,37 +624,61 @@ with trade_tab:
             st.dataframe(df_raw.head(), use_container_width=True)
 
             df_norm = normalize_broker_df(df_raw)
-
             if df_norm.empty:
-                st.warning("No trades could be mapped from this file. We may need to customize the importer for your broker.")
+                st.warning("No trades could be mapped from this file.")
             else:
                 st.write("Mapped trades preview:")
                 st.dataframe(df_norm.head(), use_container_width=True)
 
                 if st.button("Import all mapped trades"):
                     for _, r in df_norm.iterrows():
-                        log_trade(
-                            st.session_state.user_id,
-                            r["date"],
-                            r["ticker"],
-                            r["side"],
-                            float(r["quantity"]),
-                            float(r["entry_price"]),
-                            float(r["exit_price"]),
-                            float(r["pnl"]),
-                            r["strategy"],
-                            r["notes"],
+                        conn = get_conn()
+                        conn.execute(
+                            """
+                            INSERT INTO trades (
+                                user_id, date, entry_time, exit_time, ticker, side, quantity,
+                                entry_price, exit_price, pnl, percent_gain, strategy, followed_plan, notes
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                st.session_state.user_id,
+                                r["date"],
+                                r["entry_time"],
+                                r["exit_time"],
+                                r["ticker"],
+                                r["side"],
+                                float(r["quantity"]),
+                                float(r["entry_price"]),
+                                float(r["exit_price"]),
+                                float(r["pnl"]),
+                                float(r["percent_gain"]),
+                                r["strategy"],
+                                int(r["followed_plan"]),
+                                r["notes"],
+                            )
                         )
-                    st.success(f"Imported {len(df_norm)} trades into your journal.")
+                        conn.commit()
+                        conn.close()
+                    st.success(f"Imported {len(df_norm)} trades.")
                     st.rerun()
 
     conn = get_conn()
     df_trades = pd.read_sql(
-        "SELECT date, ticker, side, quantity, entry_price, exit_price, pnl, strategy, notes FROM trades WHERE user_id = ? ORDER BY id DESC",
+        """
+        SELECT date, entry_time, exit_time, ticker, side, quantity,
+               entry_price, exit_price, pnl, percent_gain, strategy, followed_plan, notes
+        FROM trades
+        WHERE user_id = ?
+        ORDER BY date DESC, entry_time DESC
+        """,
         conn,
         params=(st.session_state.user_id,)
     )
     conn.close()
+
+    if not df_trades.empty:
+        df_trades["followed_plan"] = df_trades["followed_plan"].map({1: "Yes", 0: "No"})
     st.subheader("Your Trades")
     st.dataframe(df_trades, use_container_width=True)
 
@@ -476,24 +702,100 @@ with watch_tab:
 with analytics_tab:
     st.subheader("Performance Analytics")
     conn = get_conn()
-    df_trades = pd.read_sql(
-        "SELECT ticker, pnl FROM trades WHERE user_id = ?",
+    df_analytics = pd.read_sql(
+        """
+        SELECT date, entry_time, ticker, side, pnl, percent_gain, strategy, followed_plan
+        FROM trades
+        WHERE user_id = ?
+        ORDER BY date, entry_time
+        """,
         conn,
         params=(st.session_state.user_id,)
     )
     conn.close()
-    if not df_trades.empty:
-        total_pnl = df_trades["pnl"].sum()
-        win_rate = (df_trades["pnl"] > 0).mean() * 100
-        st.metric("Total P&L", f"${total_pnl:,.2f}")
-        st.metric("Win Rate", f"{win_rate:.1f}%")
-        st.bar_chart(df_trades.groupby("ticker")["pnl"].sum())
+
+    if not df_analytics.empty:
+        total_pnl = df_analytics["pnl"].sum()
+        win_rate = (df_analytics["pnl"] > 0).mean() * 100
+        avg_pct = df_analytics["percent_gain"].mean()
+        avg_win_pct = df_analytics[df_analytics["pnl"] > 0]["percent_gain"].mean() if not df_analytics[df_analytics["pnl"] > 0].empty else 0
+        avg_loss_pct = df_analytics[df_analytics["pnl"] < 0]["percent_gain"].mean() if not df_analytics[df_analytics["pnl"] < 0].empty else 0
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total P&L", f"${total_pnl:,.2f}")
+        c2.metric("Win Rate", f"{win_rate:.1f}%")
+        c3.metric("Avg % / Trade", f"{avg_pct:+.2f}%")
+        c4.metric("Largest Trade", f"${df_analytics['pnl'].max():,.2f}")
+
+        df_analytics["date"] = pd.to_datetime(df_analytics["date"], errors="coerce")
+        daily = df_analytics.groupby("date", as_index=False)["pnl"].sum().sort_values("date")
+        daily["running_total"] = daily["pnl"].cumsum()
+
+        st.subheader("Running Total P&L")
+        st.line_chart(daily.set_index("date")["running_total"])
+
+        df_analytics["hour"] = pd.to_datetime(df_analytics["entry_time"], format="%H:%M", errors="coerce").dt.hour
+        hourly = df_analytics.groupby("hour", dropna=True)["pnl"].sum()
+        if not hourly.empty:
+            st.subheader("P&L by Hour of Day")
+            st.bar_chart(hourly)
+
+        if df_analytics["strategy"].fillna("").ne("").any():
+            st.subheader("Performance by Strategy")
+            strat_stats = df_analytics.groupby("strategy", dropna=False).agg(
+                trades=("pnl", "count"),
+                total_pnl=("pnl", "sum"),
+                avg_pct=("percent_gain", "mean")
+            ).reset_index()
+            st.dataframe(strat_stats, use_container_width=True)
+
+        st.subheader("Discipline Metrics")
+        followed_pct = (df_analytics["followed_plan"] == 1).mean() * 100
+        st.metric("Trades Following Plan", f"{followed_pct:.1f}%")
+        st.write(f"Average % gain on winners: {avg_win_pct:+.2f}%")
+        st.write(f"Average % gain on losers: {avg_loss_pct:+.2f}%")
     else:
-        st.info("Log some trades to see analytics.")
+        st.info("Log or import some trades to see analytics.")
+
+with calendar_tab:
+    st.subheader("Calendar View")
+    conn = get_conn()
+    df_cal = pd.read_sql(
+        """
+        SELECT date, pnl, percent_gain, followed_plan
+        FROM trades
+        WHERE user_id = ?
+        """,
+        conn,
+        params=(st.session_state.user_id,)
+    )
+    conn.close()
+
+    today = datetime.date.today()
+    c1, c2 = st.columns(2)
+    selected_year = c1.selectbox("Year", list(range(today.year - 2, today.year + 3)), index=2)
+    selected_month = c2.selectbox("Month", list(range(1, 13)), index=today.month - 1)
+
+    if not df_cal.empty:
+        df_cal["date"] = pd.to_datetime(df_cal["date"], errors="coerce")
+        df_cal = df_cal.dropna(subset=["date"])
+        df_cal["date_str"] = df_cal["date"].dt.strftime("%Y-%m-%d")
+        daily = df_cal.groupby("date_str").agg(
+            daily_pnl=("pnl", "sum"),
+            follow_ratio=("followed_plan", "mean")
+        ).reset_index().rename(columns={"date_str": "date"})
+        daily["daily_pct"] = (daily["daily_pnl"] / account_size) * 100
+        render_calendar(daily, selected_year, selected_month)
+
+        st.subheader("Daily Summary")
+        month_df = daily[daily["date"].str.startswith(f"{selected_year:04d}-{selected_month:02d}")]
+        st.dataframe(month_df, use_container_width=True)
+    else:
+        st.info("No trades available for calendar view yet.")
 
 with ai_tab:
     st.subheader("AI Assistant")
-    st.caption("Each user can bring their own AI API key. Your journal stays private to your login.")
+    st.caption("Use your own API key. The assistant is tuned for strategy, time-of-day, discipline, and performance review.")
 
     provider = st.selectbox("AI Provider", ["Groq", "Perplexity", "OpenAI Compatible"])
     cfg = provider_config(provider)
@@ -501,7 +803,11 @@ with ai_tab:
     model = st.text_input("Model", value=cfg["model"])
     system_prompt = st.text_area(
         "System prompt",
-        value="You are a trading journal assistant. Help summarize notes, review trades, and answer market research questions clearly."
+        value=(
+            "You are a trading journal assistant. Analyze trades by time of day, percent gain, "
+            "dollar P&L, strategy, and whether the trader followed the plan. Help identify patterns, "
+            "mistakes, strengths, and discipline issues."
+        )
     )
     api_key_input = st.text_input("Your API key", type="password", value=st.session_state.user_api_key)
     st.session_state.user_api_key = api_key_input
@@ -513,7 +819,7 @@ with ai_tab:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        user_input = st.chat_input("Ask your AI assistant about trades, setups, or market news...")
+        user_input = st.chat_input("Ask your AI assistant about strategy, discipline, or performance...")
         if user_input:
             st.session_state.ai_history.append({"role": "user", "content": user_input})
             with st.chat_message("user"):
@@ -530,12 +836,5 @@ with ai_tab:
                         )
                         st.markdown(answer)
                         st.session_state.ai_history.append({"role": "assistant", "content": answer})
-                        log_activity(
-                            st.session_state.user_id,
-                            f"AI Chat ({provider})",
-                            user_input,
-                            answer[:500],
-                            "Auto-logged from AI Assistant tab"
-                        )
                     except Exception as e:
                         st.error(f"API error: {e}")
