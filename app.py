@@ -608,20 +608,22 @@ def get_local_now():
 
 def market_status_and_countdown():
     now_local = get_local_now()
-    # Compute corresponding ET datetime
-    eastern_offset = timedelta(hours=-4)  # ET is UTC-4 during US daylight time; adjust if needed
-    now_et = (now_local.astimezone(timezone.utc) - eastern_offset)
 
+    # Fixed market reference timezone: Eastern
+    et = timezone(timedelta(hours=-4))  # works for current daylight period
+
+    now_et = now_local.astimezone(et)
     today_et = now_et.date()
-    open_dt = datetime.combine(today_et, US_MARKET_OPEN_ET)
-    close_dt = datetime.combine(today_et, US_MARKET_CLOSE_ET)
+
+    open_dt = datetime.combine(today_et, US_MARKET_OPEN_ET, tzinfo=et)
+    close_dt = datetime.combine(today_et, US_MARKET_CLOSE_ET, tzinfo=et)
 
     status = "Market closed"
     countdown = None
     ding = False
 
     if now_et < open_dt:
-        delta_to_open = (open_dt - now_et)
+        delta_to_open = open_dt - now_et
         if delta_to_open <= timedelta(minutes=PREOPEN_WINDOW_MINUTES):
             status = "Market opens in"
             countdown = delta_to_open
