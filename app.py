@@ -590,24 +590,51 @@ def mini_futures_chart(symbol: str):
     Build a small mock mini-chart for a futures instrument.
     Later you can replace the data with real prices.
     """
-    idx = pd.date_range(end=datetime.now(), periods=30, freq="H")
+    idx = pd.date_range(
+        end=pd.Timestamp.now(),
+        periods=30,
+        freq=pd.Timedelta(hours=1)
+    )
+
+    base_map = {
+        "ES": 6200,
+        "NQ": 22800,
+        "YM": 44500,
+        "RTY": 2180,
+        "CL": 82,
+        "GC": 2380,
+    }
+    base = base_map.get(symbol, 100)
+
+    np.random.seed(abs(hash(symbol)) % (2**32))
+    steps = np.random.normal(0, 1, len(idx))
+    prices = base + np.cumsum(steps)
+
     df = pd.DataFrame({
         "time": idx,
-        "price": np.cumsum(np.random.randn(len(idx))) + 100
+        "price": prices
     })
+
+    line_color = "#22c55e" if prices[-1] >= prices[0] else "#ef4444"
+
     fig = px.line(
         df,
         x="time",
         y="price",
         title=f"{symbol} mini-chart",
     )
+    fig.update_traces(line=dict(color=line_color, width=2))
     fig.update_layout(
         height=160,
-        margin=dict(l=10, r=10, t=24, b=10),
+        margin=dict(l=8, r=8, t=28, b=8),
         xaxis_title=None,
         yaxis_title=None,
         showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
     )
+    fig.update_xaxes(showgrid=False, visible=False)
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(148,163,184,0.12)")
     return fig
 
 
