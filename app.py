@@ -37,7 +37,7 @@ st.markdown("""
     max-width: 96rem;
 }
 
-/* Top header: title + clock */
+/* Top header: title left, clock right */
 .app-header {
     display: flex;
     align-items: baseline;
@@ -143,7 +143,7 @@ div[data-testid="stMetric"] {
     background: rgba(15,23,42,0.5);
 }
 
-/* Mini futures charts row */
+/* Mini futures row in Watchlist */
 .futures-mini-row {
     margin-bottom: 8px;
 }
@@ -292,7 +292,6 @@ def get_trades_df():
 
         return df[DEFAULT_TRADE_COLUMNS], None
     except Exception:
-        # Friendly empty state instead of technical error
         return empty, "Nothing here yet. Add a trade to get started."
 
 
@@ -586,6 +585,32 @@ def setup_pnl_chart(df: pd.DataFrame):
     return fig
 
 
+def mini_futures_chart(symbol: str):
+    """
+    Build a small mock mini-chart for a futures instrument.
+    Later you can replace the data with real prices.
+    """
+    idx = pd.date_range(end=datetime.now(), periods=30, freq="H")
+    df = pd.DataFrame({
+        "time": idx,
+        "price": np.cumsum(np.random.randn(len(idx))) + 100
+    })
+    fig = px.line(
+        df,
+        x="time",
+        y="price",
+        title=f"{symbol} mini-chart",
+    )
+    fig.update_layout(
+        height=160,
+        margin=dict(l=10, r=10, t=24, b=10),
+        xaxis_title=None,
+        yaxis_title=None,
+        showlegend=False,
+    )
+    return fig
+
+
 def get_futures_snapshot(symbols):
     rows = []
     for s in symbols:
@@ -640,7 +665,7 @@ trades_df, trades_msg = get_trades_df()
 watchlist_df, watchlist_msg = get_watchlist_df()
 
 # =========================
-# Header (title left, clock + date + market status right)
+# Header
 # =========================
 now_local, market_status, countdown, ding = market_status_and_countdown()
 date_str = now_local.strftime("%a, %b %-d, %Y") if hasattr(now_local, "strftime") else ""
@@ -685,33 +710,43 @@ tab_dashboard, tab_trades, tab_watchlist, tab_calendar = st.tabs(
 with tab_dashboard:
     metrics = trades_metrics(trades_df)
 
-    # Order: 5,2,3,1,4,6,7
-    m_trades, m_net, m_gross, m_daily, m_comm, m_win, m_avg = st.columns(7)
+    # Order: Trades, Daily P&L, Net P&L, Gross P&L, Commissions, Win Rate, Avg Trade
+    m_trades, m_daily, m_net, m_gross, m_comm, m_win, m_avg = st.columns(7)
     m_trades.metric("Trades", f"{metrics['trades']}")
+    m_daily.metric("Daily P&L", format_money(metrics["daily_pnl"]), f"{metrics['daily_pct']:+.2f}%")
     m_net.metric("Net P&L", format_money(metrics["net_pnl"]), f"{metrics['net_pct']:+.2f}%")
     m_gross.metric("Gross P&L", format_money(metrics["gross_pnl"]))
-    m_daily.metric("Daily P&L", format_money(metrics["daily_pnl"]), f"{metrics['daily_pct']:+.2f}%")
     m_comm.metric("Commissions", format_money(metrics["commissions"]))
     m_win.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
     m_avg.metric("Avg Trade", format_money(metrics["avg_trade"]))
 
-    c1, c2 = st.columns(2)
-    with c1:
-        fig = equity_curve_chart(trades_df)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Nothing here yet. Add a trade to get started.")
-    with c2:
-        fig = monthly_pnl_chart(trades_df)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Nothing here yet. Add a trade to get started.")
+    main_col, side_col = st.columns([3, 1])
 
-    fig = setup_pnl_chart(trades_df)
-    if fig:
-        st.plotly_chart(fig, use_container_width=True)
+    with main_col:
+        c1, c2 = st.columns(2)
+        with c1:
+            fig_eq = equity_curve_chart(trades_df)
+            if fig_eq:
+                st.plotly_chart(fig_eq, use_container_width=True)
+            else:
+                st.info("Nothing here yet. Add a trade to get started.")
+        with c2:
+            fig_month = monthly_pnl_chart(trades_df)
+            if fig_month:
+                st.plotly_chart(fig_month, use_container_width=True)
+            else:
+                st.info("Nothing here yet. Add a trade to get started.")
+
+        fig_setup = setup_pnl_chart(trades_df)
+        if fig_setup:
+            st.plotly_chart(fig_setup, use_container_width=True)
+
+    with side_col:
+        st.markdown("#### Futures mini-charts")
+        fig_es = mini_futures_chart("ES")
+        st.plotly_chart(fig_es, use_container_width=True)
+        fig_nq = mini_futures_chart("NQ")
+        st.plotly_chart(fig_nq, use_container_width=True)
 
 # =========================
 # Trades
