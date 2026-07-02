@@ -1,7 +1,7 @@
 import os
 import math
 import calendar
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -32,45 +32,77 @@ st.set_page_config(
 st.markdown("""
 <style>
 .block-container {
-    padding-top: 1.1rem;
+    padding-top: 0.75rem;
     padding-bottom: 2rem;
     max-width: 96rem;
 }
+
+/* Top header: clock + title */
+.app-header {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+}
+.app-header-left {
+    font-size: 0.9rem;
+    color: #9ca3af;
+}
+.app-header-left strong {
+    color: #e5e7eb;
+}
+.app-header-right h1 {
+    margin: 0;
+}
+.app-header-status {
+    font-size: 0.8rem;
+    color: #9ca3af;
+}
+
+/* KPI metrics */
 div[data-testid="stMetric"] {
-    border: 1px solid rgba(128,128,128,0.20);
+    border: 1px solid rgba(148,163,184,0.35);
     border-radius: 12px;
     padding: 10px 14px;
-    background: rgba(255,255,255,0.02);
+    background: rgba(15,23,42,0.4);
 }
+
+/* Generic cards */
 .section-card {
-    border: 1px solid rgba(128,128,128,0.20);
+    border: 1px solid rgba(148,163,184,0.35);
     border-radius: 14px;
     padding: 14px;
-    background: rgba(255,255,255,0.015);
+    background: rgba(15,23,42,0.5);
 }
 .small-muted {
     color: #9aa0a6;
     font-size: 0.9rem;
 }
+
+/* Calendar */
 .calendar-header {
     text-align: center;
     font-weight: 700;
     padding: 8px 0;
-    border-bottom: 1px solid rgba(128,128,128,0.15);
+    border-bottom: 1px solid rgba(148,163,184,0.35);
     margin-bottom: 4px;
 }
 .calendar-cell {
-    border: 1px solid rgba(128,128,128,0.15);
+    border: 1px solid rgba(148,163,184,0.35);
     border-radius: 12px;
     min-height: 120px;
     padding: 8px;
     margin-bottom: 8px;
-    background: rgba(255,255,255,0.02);
+    background: rgba(15,23,42,0.5);
+    position: relative;
 }
 .calendar-cell.empty {
-    background: rgba(255,255,255,0.01);
+    background: rgba(15,23,42,0.25);
     border-style: dashed;
-    min-height: 120px;
+}
+.calendar-cell.today {
+    border-color: #fbbf24;
+    box-shadow: 0 0 0 1px rgba(251,191,36,0.6);
 }
 .calendar-day-num {
     font-size: 0.95rem;
@@ -86,15 +118,40 @@ div[data-testid="stMetric"] {
     border-radius: 999px;
     font-size: 0.75rem;
     margin-top: 6px;
-    background: rgba(255,255,255,0.08);
+    background: rgba(148,163,184,0.25);
 }
+.today-badge {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(251,191,36,0.9);
+    color: #111827;
+    font-weight: 600;
+}
+
+/* Watchlist top controls */
 .watchlist-top {
-    border: 1px solid rgba(128,128,128,0.18);
+    border: 1px solid rgba(148,163,184,0.35);
     border-radius: 14px;
     padding: 12px 14px;
     margin-bottom: 14px;
-    background: rgba(255,255,255,0.02);
+    background: rgba(15,23,42,0.5);
 }
+
+/* Mini futures charts row */
+.futures-mini-row {
+    margin-bottom: 8px;
+}
+.futures-mini-title {
+    font-size: 0.85rem;
+    color: #9aa0a6;
+    margin-bottom: 4px;
+}
+
+/* Minor tweaks */
 hr {
     margin-top: 0.5rem;
     margin-bottom: 1rem;
@@ -121,6 +178,10 @@ WATCHLIST_COLUMNS = [
 ]
 
 FUTURES_SYMBOLS_DEFAULT = ["ES", "NQ", "YM", "RTY", "CL", "GC"]
+
+US_MARKET_OPEN_ET = time(9, 30)   # 9:30 AM Eastern
+US_MARKET_CLOSE_ET = time(16, 0)  # 4:00 PM Eastern
+PREOPEN_WINDOW_MINUTES = 30       # countdown starts this many minutes before open
 
 
 # =========================
@@ -169,23 +230,7 @@ def db_ready():
 def fetch_table_columns(table_name: str):
     if not db_ready():
         return []
-    try:
-        query = """
-        select column_name
-        from information_schema.columns
-        where table_schema = 'public'
-          and table_name = '{table}'
-        order by ordinal_position
-        """.format(table=table_name)
-
-        res = supabase.rpc("exec_sql", {"sql": query}).execute()
-        data = getattr(res, "data", None)
-        if isinstance(data, list) and len(data) > 0 and "column_name" in data[0]:
-            return [r["column_name"] for r in data]
-    except Exception:
-        pass
-
-    # Fallback if exec_sql RPC does not exist
+    # Basic best-effort schema detection via sample row
     try:
         sample = supabase.table(table_name).select("*").limit(1).execute()
         rows = getattr(sample, "data", None) or []
@@ -193,7 +238,6 @@ def fetch_table_columns(table_name: str):
             return list(rows[0].keys())
     except Exception:
         pass
-
     return []
 
 
@@ -247,7 +291,8 @@ def get_trades_df():
 
         return df[DEFAULT_TRADE_COLUMNS], None
     except Exception as e:
-        return empty, f"Could not load trades: {e}"
+        # Friendly empty state instead of technical error
+        return empty, "Nothing here yet. Add a trade to get started."
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -257,21 +302,13 @@ def get_watchlist_df():
         return empty, "Supabase is not configured."
 
     existing = get_existing_watchlist_columns()
-    if not existing:
-        try:
-            res = supabase.table("watchlist").select("*").order("created_at", desc=True).execute()
-            rows = getattr(res, "data", None) or []
-            df = pd.DataFrame(rows)
-        except Exception as e:
-            return empty, f"Could not load watchlist: {e}"
-    else:
+    try:
         cols = [c for c in WATCHLIST_COLUMNS if c in existing] or existing
-        try:
-            res = supabase.table("watchlist").select(",".join(cols)).order("created_at", desc=True).execute()
-            rows = getattr(res, "data", None) or []
-            df = pd.DataFrame(rows)
-        except Exception as e:
-            return empty, f"Could not load watchlist: {e}"
+        res = supabase.table("watchlist").select(",".join(cols) if cols else "*").order("created_at", desc=True).execute()
+        rows = getattr(res, "data", None) or []
+        df = pd.DataFrame(rows)
+    except Exception as e:
+        return empty, "Nothing here yet. Add a symbol to get started."
 
     for c in WATCHLIST_COLUMNS:
         if c not in df.columns:
@@ -370,7 +407,11 @@ def daily_calendar_agg(trades_df: pd.DataFrame):
     follow_ratio = follow_df.groupby("date", as_index=False)["fp"].mean().rename(columns={"fp": "follow_ratio"})
 
     out = g.merge(follow_ratio, on="date", how="left")
-    out["daily_pct"] = np.nan
+
+    # Daily percentage move: you can plug in your account base here if desired
+    base_capital = 20000.0
+    out["daily_pct"] = out["daily_net_pnl"] / base_capital * 100.0
+
     return out.sort_values("date")
 
 
@@ -389,15 +430,7 @@ def render_calendar_grid(year: int, month: int, cal_df: pd.DataFrame):
         for _, row in cal_df.iterrows():
             day_map[row["date"]] = row.to_dict()
 
-    st.markdown(
-        """
-        <div class="section-card">
-            <div class="calendar-header">Sun</div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    # overwrite immediately with row headers below; dummy keeps spacing stable in some themes
+    today = datetime.now().date()
 
     dow = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
     cols = st.columns(7)
@@ -417,11 +450,14 @@ def render_calendar_grid(year: int, month: int, cal_df: pd.DataFrame):
                 d = date(year, month, day)
                 row = day_map.get(d, None)
 
+                is_today = (d == today)
+
                 if row is None:
                     html = f"""
-                    <div class='calendar-cell'>
+                    <div class='calendar-cell{" today" if is_today else ""}'>
                         <div class='calendar-day-num'>{day}</div>
                         <div class='small-muted'>No trades</div>
+                        {"<div class='today-badge'>Today</div>" if is_today else ""}
                     </div>
                     """
                     st.markdown(html, unsafe_allow_html=True)
@@ -429,17 +465,19 @@ def render_calendar_grid(year: int, month: int, cal_df: pd.DataFrame):
                     net = safe_float(row.get("daily_net_pnl"), 0.0)
                     tcount = int(row.get("trade_count", 0) or 0)
                     fr = row.get("follow_ratio", np.nan)
+                    pct = safe_float(row.get("daily_pct"), 0.0)
 
                     follow_text = "N/A"
                     if pd.notna(fr):
                         follow_text = f"{fr*100:.0f}% plan"
 
                     html = f"""
-                    <div class='calendar-cell'>
+                    <div class='calendar-cell{" today" if is_today else ""}'>
                         <div class='calendar-day-num'>{day}</div>
-                        <div class='{pnl_class(net)}'>{format_money(net)}</div>
+                        <div class='{pnl_class(net)}'>{format_money(net)} ({pct:+.2f}%)</div>
                         <div class='small-muted'>{tcount} trade{'s' if tcount != 1 else ''}</div>
                         <div class='tag'>{follow_text}</div>
+                        {"<div class='today-badge'>Today</div>" if is_today else ""}
                     </div>
                     """
                     st.markdown(html, unsafe_allow_html=True)
@@ -454,6 +492,9 @@ def trades_metrics(df: pd.DataFrame):
             "trades": 0,
             "win_rate": 0.0,
             "avg_trade": 0.0,
+            "daily_pnl": 0.0,
+            "daily_pct": 0.0,
+            "net_pct": 0.0,
         }
 
     work = df.copy()
@@ -469,13 +510,31 @@ def trades_metrics(df: pd.DataFrame):
 
     trades = len(work)
     wins = int((work["pnl"] > 0).sum())
+
+    base_capital = 20000.0  # adjust to your true account base
+
+    net_pnl = float(work["pnl"].sum())
+    net_pct = net_pnl / base_capital * 100.0
+
+    # Daily P&L (today only)
+    today = datetime.now().date()
+    if "trade_date" in work.columns:
+        today_rows = work[pd.to_datetime(work["trade_date"], errors="coerce").dt.date == today]
+    else:
+        today_rows = pd.DataFrame(columns=work.columns)
+    daily_pnl = float(today_rows["pnl"].sum()) if not today_rows.empty else 0.0
+    daily_pct = daily_pnl / base_capital * 100.0
+
     return {
-        "net_pnl": float(work["pnl"].sum()),
+        "net_pnl": net_pnl,
         "gross_pnl": float(work["gross_pnl"].sum()),
         "commissions": float(work["commissions"].sum()),
         "trades": trades,
         "win_rate": (wins / trades * 100.0) if trades else 0.0,
         "avg_trade": float(work["pnl"].mean()) if trades else 0.0,
+        "daily_pnl": daily_pnl,
+        "daily_pct": daily_pct,
+        "net_pct": net_pct,
     }
 
 
@@ -497,7 +556,7 @@ def monthly_pnl_chart(df: pd.DataFrame):
         color="pnl",
         color_continuous_scale=["#ef4444", "#94a3b8", "#22c55e"]
     )
-    fig.update_layout(height=360, margin=dict(l=10, r=10, t=40, b=10), coloraxis_showscale=False)
+    fig.update_layout(height=330, margin=dict(l=10, r=10, t=40, b=10), coloraxis_showscale=False)
     return fig
 
 
@@ -511,7 +570,7 @@ def equity_curve_chart(df: pd.DataFrame):
     work["pnl"] = pd.to_numeric(work["pnl"], errors="coerce").fillna(0.0)
     work["equity"] = work["pnl"].cumsum()
     fig = px.line(work, x="trade_date", y="equity", title="Equity Curve", markers=False)
-    fig.update_layout(height=360, margin=dict(l=10, r=10, t=40, b=10))
+    fig.update_layout(height=330, margin=dict(l=10, r=10, t=40, b=10))
     return fig
 
 
@@ -525,35 +584,91 @@ def setup_pnl_chart(df: pd.DataFrame):
     if agg.empty:
         return None
     fig = px.bar(agg, x="setup", y="pnl", title="Net P&L by Setup")
-    fig.update_layout(height=360, margin=dict(l=10, r=10, t=40, b=10))
+    fig.update_layout(height=330, margin=dict(l=10, r=10, t=40, b=10))
     return fig
 
 
 def get_futures_snapshot(symbols):
-    # Placeholder/manual snapshot section so UI stays side-by-side even without live feed
+    # Placeholder row; connect to real data later
     rows = []
     for s in symbols:
         rows.append({
-            "Symbol": s,
+            "Instrument": f"{s} Futures",
             "Last": np.nan,
             "Change": np.nan,
             "%": np.nan,
-            "Note": "Manual / feed pending"
         })
     return pd.DataFrame(rows)
+
+
+def get_local_now():
+    # Get aware datetime in local system timezone
+    return datetime.now(timezone.utc).astimezone()
+
+
+def market_status_and_countdown():
+    now_local = get_local_now()
+    # Compute corresponding ET datetime
+    eastern_offset = timedelta(hours=-4)  # ET is UTC-4 during US daylight time; adjust if needed
+    now_et = (now_local.astimezone(timezone.utc) - eastern_offset)
+
+    today_et = now_et.date()
+    open_dt = datetime.combine(today_et, US_MARKET_OPEN_ET)
+    close_dt = datetime.combine(today_et, US_MARKET_CLOSE_ET)
+
+    status = "Market closed"
+    countdown = None
+    ding = False
+
+    if now_et < open_dt:
+        delta_to_open = (open_dt - now_et)
+        if delta_to_open <= timedelta(minutes=PREOPEN_WINDOW_MINUTES):
+            status = "Market opens in"
+            countdown = delta_to_open
+            if delta_to_open <= timedelta(seconds=1):
+                ding = True
+        else:
+            status = "Market closed"
+    elif open_dt <= now_et <= close_dt:
+        status = "Market open"
+    else:
+        status = "Market closed"
+
+    return now_local, status, countdown, ding
 
 
 # =========================
 # Data load
 # =========================
-trades_df, trades_error = get_trades_df()
-watchlist_df, watchlist_error = get_watchlist_df()
+trades_df, trades_msg = get_trades_df()
+watchlist_df, watchlist_msg = get_watchlist_df()
 
 # =========================
-# Header
+# Header (clock + date + market status)
 # =========================
-st.title("Trading Journal")
-st.caption("Journal, analytics, watchlist, futures board, and calendar")
+now_local, market_status, countdown, ding = market_status_and_countdown()
+date_str = now_local.strftime("%a, %b %-d, %Y") if hasattr(now_local, "strftime") else ""
+time_str = now_local.strftime("%-I:%M %p") if hasattr(now_local, "strftime") else ""
+
+header_html = f"""
+<div class="app-header">
+  <div class="app-header-left">
+    <div><strong>{time_str}</strong> • {date_str}</div>
+    <div class="app-header-status">
+      {market_status}{(" " + f"{int(countdown.total_seconds()//60):02d}:{int(countdown.total_seconds()%60):02d}") if countdown else ""}
+    </div>
+  </div>
+  <div class="app-header-right">
+    <h1>Trading Journal</h1>
+  </div>
+</div>
+"""
+
+st.markdown(header_html, unsafe_allow_html=True)
+
+# Play ding at market open (simple placeholder)
+if ding:
+    st.audio("https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg")
 
 if not db_ready():
     st.warning("Supabase credentials are missing. The app will still render, but database features will not work.")
@@ -561,8 +676,8 @@ if not db_ready():
 # =========================
 # Tabs
 # =========================
-tab_dashboard, tab_trades, tab_watchlist, tab_futures, tab_calendar = st.tabs(
-    ["Dashboard", "Trades", "Watchlist", "Futures", "Calendar"]
+tab_dashboard, tab_trades, tab_watchlist, tab_calendar = st.tabs(
+    ["Dashboard", "Trades", "Watchlist", "Calendar"]
 )
 
 # =========================
@@ -571,13 +686,14 @@ tab_dashboard, tab_trades, tab_watchlist, tab_futures, tab_calendar = st.tabs(
 with tab_dashboard:
     metrics = trades_metrics(trades_df)
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Net P&L", format_money(metrics["net_pnl"]))
+    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+    m1.metric("Net P&L", format_money(metrics["net_pnl"]), f"{metrics['net_pct']:+.2f}%")
     m2.metric("Gross P&L", format_money(metrics["gross_pnl"]))
     m3.metric("Commissions", format_money(metrics["commissions"]))
     m4.metric("Trades", f"{metrics['trades']}")
     m5.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
     m6.metric("Avg Trade", format_money(metrics["avg_trade"]))
+    m7.metric("Daily P&L", format_money(metrics["daily_pnl"]), f"{metrics['daily_pct']:+.2f}%")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -585,20 +701,17 @@ with tab_dashboard:
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("No trade data yet for the equity curve.")
+            st.info("Nothing here yet. Add a trade to get started.")
     with c2:
         fig = monthly_pnl_chart(trades_df)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("No trade data yet for monthly P&L.")
+            st.info("Nothing here yet. Add a trade to get started.")
 
     fig = setup_pnl_chart(trades_df)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
-
-    if trades_error:
-        st.warning(trades_error)
 
 # =========================
 # Trades
@@ -618,7 +731,10 @@ with tab_trades:
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            trade_date = st.date_input("Trade date", value=(existing.get("trade_date").date() if pd.notna(existing.get("trade_date")) else date.today()))
+            trade_date = st.date_input(
+                "Trade date",
+                value=(existing.get("trade_date").date() if pd.notna(existing.get("trade_date")) else date.today())
+            )
             ticker = st.text_input("Ticker", value="" if pd.isna(existing.get("ticker")) else str(existing.get("ticker", "")))
             setup = st.text_input("Setup", value="" if pd.isna(existing.get("setup")) else str(existing.get("setup", "")))
             side = st.selectbox("Side", ["Long", "Short"], index=0 if str(existing.get("side", "Long")).lower() != "short" else 1)
@@ -668,13 +784,17 @@ with tab_trades:
                 else:
                     st.error(f"Delete failed: {msg}")
 
-    if trades_error:
-        st.warning(trades_error)
+    # Manual import above manual entry (placeholder section)
+    st.markdown("### Manual import")
+    st.info("Manual import will go here (e.g., file upload / broker export).")
 
     st.markdown("### Trade log")
     display_df = trades_df.copy()
     if not display_df.empty and "trade_date" in display_df.columns:
         display_df["trade_date"] = pd.to_datetime(display_df["trade_date"], errors="coerce").dt.date
+
+    if trades_msg:
+        st.info(trades_msg)
 
     if AGGRID_AVAILABLE and not display_df.empty:
         gb = GridOptionsBuilder.from_dataframe(display_df)
@@ -695,11 +815,33 @@ with tab_trades:
         st.dataframe(display_df, use_container_width=True, height=420)
 
 # =========================
-# Watchlist
+# Watchlist (combined ideas + prep + futures mini-charts)
 # =========================
 with tab_watchlist:
     st.subheader("Watchlist")
 
+    # Mini futures charts row at top, kept small and side by side
+    st.markdown("<div class='futures-mini-row'>", unsafe_allow_html=True)
+    fc1, fc2, fc3 = st.columns(3)
+    symbols_text = ", ".join(FUTURES_SYMBOLS_DEFAULT)
+    fut_df = get_futures_snapshot(FUTURES_SYMBOLS_DEFAULT)
+    with fc1:
+        st.markdown("<div class='futures-mini-title'>Market context</div>", unsafe_allow_html=True)
+        st.dataframe(fut_df, use_container_width=True, height=130)
+    with fc2:
+        st.markdown("<div class='futures-mini-title'>Notes</div>", unsafe_allow_html=True)
+        st.text_area(
+            "Futures prep",
+            placeholder="Key levels, overnight inventory, bias, economic events...",
+            height=130,
+            label_visibility="collapsed",
+        )
+    with fc3:
+        st.markdown("<div class='futures-mini-title'>Symbols", unsafe_allow_html=True)
+        st.text_input("Symbols", value=symbols_text, label_visibility="collapsed")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Watchlist top controls
     st.markdown("<div class='watchlist-top'>", unsafe_allow_html=True)
     top1, top2, top3, top4, top5 = st.columns([1.2, 1.2, 1.6, 1.2, 1.0])
     with top1:
@@ -730,11 +872,11 @@ with tab_watchlist:
         else:
             st.error(f"Add failed: {msg}")
 
-    if watchlist_error:
-        st.warning(watchlist_error)
+    if watchlist_msg:
+        st.info(watchlist_msg)
 
     if watchlist_df.empty:
-        st.info("No watchlist items yet.")
+        st.info("Nothing here yet. Add a symbol to get started.")
     else:
         show_cols = [c for c in ["id", "symbol", "bias", "thesis", "entry_zone", "invalidate", "catalyst", "status", "notes", "created_at"] if c in watchlist_df.columns]
         st.dataframe(watchlist_df[show_cols], use_container_width=True, height=420)
@@ -748,9 +890,17 @@ with tab_watchlist:
                 c1, c2 = st.columns(2)
                 with c1:
                     symbol = st.text_input("Symbol ", value=str(row.get("symbol", "")))
-                    bias = st.selectbox("Bias ", ["Long", "Short", "Neutral"], index=["Long", "Short", "Neutral"].index(str(row.get("bias", "Neutral"))) if str(row.get("bias", "Neutral")) in ["Long", "Short", "Neutral"] else 2)
+                    bias = st.selectbox(
+                        "Bias ",
+                        ["Long", "Short", "Neutral"],
+                        index=["Long", "Short", "Neutral"].index(str(row.get("bias", "Neutral"))) if str(row.get("bias", "Neutral")) in ["Long", "Short", "Neutral"] else 2
+                    )
                     thesis = st.text_input("Thesis ", value="" if pd.isna(row.get("thesis")) else str(row.get("thesis", "")))
-                    status = st.selectbox("Status ", ["Active", "Watching", "Triggered", "Closed"], index=["Active", "Watching", "Triggered", "Closed"].index(str(row.get("status", "Watching"))) if str(row.get("status", "Watching")) in ["Active", "Watching", "Triggered", "Closed"] else 1)
+                    status = st.selectbox(
+                        "Status ",
+                        ["Active", "Watching", "Triggered", "Closed"],
+                        index=["Active", "Watching", "Triggered", "Closed"].index(str(row.get("status", "Watching"))) if str(row.get("status", "Watching")) in ["Active", "Watching", "Triggered", "Closed"] else 1
+                    )
                 with c2:
                     entry_zone = st.text_input("Entry zone", value="" if pd.isna(row.get("entry_zone")) else str(row.get("entry_zone", "")))
                     invalidate = st.text_input("Invalidate", value="" if pd.isna(row.get("invalidate")) else str(row.get("invalidate", "")))
@@ -786,29 +936,6 @@ with tab_watchlist:
                             st.error(f"Delete failed: {msg}")
 
 # =========================
-# Futures
-# =========================
-with tab_futures:
-    st.subheader("Futures")
-
-    left, right = st.columns(2)
-
-    with left:
-        st.markdown("### Board")
-        symbols_text = st.text_input("Symbols", value=", ".join(FUTURES_SYMBOLS_DEFAULT))
-        symbols = [s.strip().upper() for s in symbols_text.split(",") if s.strip()]
-        fut_df = get_futures_snapshot(symbols)
-        st.dataframe(fut_df, use_container_width=True, height=360)
-
-    with right:
-        st.markdown("### Notes")
-        st.text_area(
-            "Futures prep",
-            placeholder="Key levels, overnight inventory, bias, economic events, and execution notes...",
-            height=360
-        )
-
-# =========================
 # Calendar
 # =========================
 with tab_calendar:
@@ -828,13 +955,13 @@ with tab_calendar:
         if trades_df is not None and not trades_df.empty:
             cal_df = daily_calendar_agg(trades_df)
     except Exception as e:
-        cal_notice = f"Trade data could not be overlaid on the calendar: {e}"
+        cal_notice = "Trade data could not be overlaid on the calendar."
 
     render_calendar_grid(year, month, cal_df)
 
     if cal_notice:
         st.info(cal_notice)
-    elif trades_error:
+    elif trades_msg:
         st.info("Calendar is showing without trade overlays because trades could not be loaded.")
 
     st.caption("The calendar grid always renders. Trade data is optional and overlays when available.")
