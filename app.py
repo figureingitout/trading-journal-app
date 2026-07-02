@@ -5,6 +5,7 @@ import requests
 import re
 import calendar
 import yfinance as yf
+import plotly.graph_objects as go
 from supabase import create_client
 
 st.set_page_config(page_title="Trading Journal", layout="wide")
@@ -40,7 +41,9 @@ def ensure_session_state():
         "access_token": None,
         "refresh_token": None,
         "ai_history": [],
-        "user_api_key": ""
+        "user_api_key": "",
+        "refresh_market": False,
+        "benchmark_mode": "Futures"
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -109,6 +112,7 @@ def sign_out_user():
     st.session_state.refresh_token = None
     st.session_state.ai_history = []
     st.session_state.user_api_key = ""
+    st.session_state.refresh_market = False
 
 
 def save_profile_if_needed(user_id: str, email: str, username: str):
@@ -235,27 +239,30 @@ def get_watchlist_df(user_id):
     return df
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=30, show_spinner=False)
 def fetch_quotes(symbols):
     results = []
     for symbol in symbols:
         try:
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period="2d", interval="1d", auto_adjust=False)
-            info = ticker.fast_info
 
             if hist is not None and len(hist) >= 2:
                 current_price = float(hist["Close"].iloc[-1])
                 previous_close = float(hist["Close"].iloc[-2])
             elif hist is not None and len(hist) == 1:
                 current_price = float(hist["Close"].iloc[-1])
-                previous_close = float(info.get("previous_close", current_price))
+                previous_close = current_price
             else:
-                current_price = float(info.get("last_price", 0))
-                previous_close = float(info.get("previous_close", current_price))
+                current_price = None
+                previous_close = None
 
-            change = current_price - previous_close
-            change_pct = (change / previous_close * 100) if previous_close else 0.0
+            if current_price is not None and previous_close not in (None, 0):
+                change = current_price - previous_close
+                change_pct = (change / previous_close) * 100
+            else:
+                change = None
+                change_pct = None
 
             results.append({
                 "symbol": symbol,
@@ -271,6 +278,21 @@ def fetch_quotes(symbols):
                 "change_pct": None
             })
     return results
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_intraday_with_sma(symbol, period="10d", interval="30m"):
+    try:
+        hist = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False)
+        if hist is None or hist.empty:
+            return pd.DataFrame()
+        df = hist[["Close"]].copy()
+        df["SMA20"] = df["Close"].rolling(window=20).mean()
+        df["SMA50"] = df["Close"].rolling(window=50).mean()
+        df["SMA200"] = df["Close"].rolling(window=200).mean()
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 def render_quote_cards(title, quote_list):
@@ -291,6 +313,55 @@ def render_quote_cards(title, quote_list):
                     f"{q['price']:.2f}",
                     delta_text
                 )
+
+
+def render_intraday_chart(symbol, df):
+    if df.empty:
+        st.info(f"No intraday data available for {symbol}.")
+        return
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df["Close"],
+        mode="lines",
+        name=f"{symbol} Price",
+        line=dict(color="white")
+    ))
+
+    if df["SMA20"].notna().any():
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df["SMA20"],
+            mode="lines",
+            name="SMA 20",
+            line=dict(color="yellow")
+        ))
+    if df["SMA50"].notna().any():
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df["SMA50"],
+            mode="lines",
+            name="SMA 50",
+            line=dict(color="cyan")
+        ))
+    if df["SMA200"].notna().any():
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df["SMA200"],
+            mode="lines",
+            name="SMA 200",
+            line=dict(color="magenta")
+        ))
+
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=30, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        template="plotly_dark",
+        height=250,
+        title=f"{symbol} – 10D / 30m with SMA 20, 50, 200"
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def ask_openai_compatible(prompt, api_key, base_url, model, system_prompt):
@@ -514,6 +585,80 @@ def render_calendar(day_df, selected_year, selected_month):
     st.markdown(header_html + tiles + footer, unsafe_allow_html=True)
 
 
+def build_performance_vs_market_chart(daily_df, mode="Futures"):
+    # Your cumulative performance (%)
+    perf = daily_df.copy()
+    perf = perf.sort_values("date")
+    base = perf["daily_pnl"].iloc[0] if len(perf) > 0 else 0
+    perf["cum_pnl"] = perf["daily_pnl"].cumsum()
+    # Treat starting point as 0% and compute percent change vs initial equity proxy
+    # Here we approximate by cumulative P&L relative to initial equity proxy:
+    # If you later want true equity curves, we can wire in account size history.
+    perf["your_return_pct"] = (perf["cum_pnl"] / max(abs(perf["daily_pnl"]).sum(), 1)) * 100
+
+    # Market benchmarks over the same dates
+    if mode == "Futures":
+        symbols = ["MES=F", "MNQ=F", "MYM=F"]
+        labels = ["MES", "MNQ", "MYM"]
+    else:
+        symbols = ["SPY", "QQQ", "DIA"]
+        labels = ["SPY", "QQQ", "DIA"]
+
+    index_returns = {}
+    for sym, label in zip(symbols, labels):
+        try:
+            hist = yf.Ticker(sym).history(period="3mo", interval="1d", auto_adjust=False)
+            if hist is None or hist.empty:
+                continue
+            df = hist[["Close"]].copy()
+            df = df.sort_index()
+            df["return_pct"] = (df["Close"] / df["Close"].iloc[0] - 1) * 100
+            index_returns[label] = df
+        except Exception:
+            continue
+
+    if not index_returns:
+        st.info("No market data available for benchmark comparison.")
+        return
+
+    # Align on dates in perf
+    fig = go.Figure()
+
+    if not perf.empty:
+        fig.add_trace(go.Scatter(
+            x=perf["date"],
+            y=perf["your_return_pct"],
+            mode="lines",
+            name="Your Performance",
+            line=dict(color="white", width=2)
+        ))
+
+    for label, df_idx in index_returns.items():
+        # Align to perf date range
+        df_idx = df_idx.copy()
+        df_idx = df_idx.loc[df_idx.index.isin(perf["date"])] if not perf.empty else df_idx
+        if df_idx.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=df_idx.index,
+            y=df_idx["return_pct"],
+            mode="lines",
+            name=label,
+            line=dict(width=1)
+        ))
+
+    fig.update_layout(
+        title=f"Your Performance vs {mode} Benchmarks (Cumulative %)",
+        margin=dict(l=10, r=10, t=40, b=10),
+        template="plotly_dark",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=300
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ----------------- APP FLOW -----------------
+
 ensure_session_state()
 sync_supabase_session()
 
@@ -601,12 +746,34 @@ if st.sidebar.button("Log out"):
     sign_out_user()
     st.rerun()
 
+# Benchmark mode: Futures vs ETF
+st.session_state.benchmark_mode = st.sidebar.radio("Benchmark Mode", ["Futures", "ETF"])
+
+# Market overview controls
+top_left, top_right = st.columns([3, 1])
+with top_right:
+    if st.button("Refresh Market Data"):
+        # Clear cache and rerun for fresh quotes/charts
+        fetch_quotes.clear()
+        fetch_intraday_with_sma.clear()
+        st.session_state.refresh_market = True
+        st.rerun()
+
+with top_left:
+    st.subheader("Market Overview")
+
 try:
     df_watch_for_top = get_watchlist_df(st.session_state.user_id)
 except Exception:
     df_watch_for_top = pd.DataFrame()
 
-market_symbols = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
+if st.session_state.benchmark_mode == "Futures":
+    market_symbols = ["MES=F", "MNQ=F", "MYM=F", "M2K=F", "^VIX"]
+    market_labels = ["MES=F", "MNQ=F", "MYM=F", "M2K=F", "^VIX"]
+else:
+    market_symbols = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
+    market_labels = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
+
 market_quotes = fetch_quotes(market_symbols)
 
 watch_symbols = []
@@ -623,12 +790,18 @@ if not df_watch_for_top.empty and "ticker" in df_watch_for_top.columns:
 
 watch_quotes = fetch_quotes(watch_symbols) if watch_symbols else []
 
-st.subheader("Market Overview")
-render_quote_cards("Major Market Signals", market_quotes)
+render_quote_cards("Benchmarks", market_quotes)
 if watch_quotes:
     render_quote_cards("Watchlist Movers", watch_quotes)
 else:
     st.info("Add some watchlist symbols to show their price action here.")
+
+# Separate charts per benchmark symbol
+st.markdown("#### Benchmark Charts (10D / 30m with SMA 20, 50, 200)")
+for sym, label in zip(market_symbols, market_labels):
+    st.markdown(f"**{label}**")
+    df_intraday = fetch_intraday_with_sma(sym, period="10d", interval="30m")
+    render_intraday_chart(sym, df_intraday)
 
 st.markdown("---")
 
@@ -914,6 +1087,17 @@ with calendar_tab:
         st.subheader("Daily Summary")
         month_df = daily[daily["date"].str.startswith(f"{selected_year:04d}-{selected_month:02d}")]
         st.dataframe(month_df, use_container_width=True)
+
+        st.subheader("Performance vs Market (Calendar Period)")
+        # Use only days in selected month for comparison chart
+        perf_month = daily[daily["date"].str.startswith(f"{selected_year:04d}-{selected_month:02d}")]
+        if perf_month.empty:
+            st.info("No trades in this month to compare against the market.")
+        else:
+            perf_month_sorted = perf_month.copy()
+            perf_month_sorted["date"] = pd.to_datetime(perf_month_sorted["date"], errors="coerce")
+            perf_month_sorted = perf_month_sorted.dropna(subset=["date"]).sort_values("date")
+            build_performance_vs_market_chart(perf_month_sorted, mode=st.session_state.benchmark_mode)
     else:
         st.info("No trades available for calendar view yet.")
 
