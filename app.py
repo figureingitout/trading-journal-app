@@ -208,6 +208,75 @@ def provider_config(provider_name):
     return configs[provider_name]
 
 
+def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
+    df = df_raw.copy()
+    lower_cols = {c.lower(): c for c in df.columns}
+
+    def pick(*candidates):
+        for cand in candidates:
+            if cand.lower() in lower_cols:
+                return lower_cols[cand.lower()]
+        return None
+
+    date_col = pick("date", "time", "timestamp", "trade_date", "open_time", "filled time", "execution time")
+    symbol_col = pick("symbol", "ticker", "instrument", "product", "asset", "market")
+    side_col = pick("side", "buy_sell", "direction", "type", "action")
+    qty_col = pick("quantity", "qty", "size", "amount", "contracts", "shares")
+    entry_col = pick("entry_price", "price", "open_price", "avg_price", "fill_price", "buy_price")
+    exit_col = pick("exit_price", "close_price", "sell_price", "exit", "closing_price")
+    pnl_col = pick("pnl", "profit", "pl", "realized_pnl", "net_profit", "realized p&l")
+    notes_col = pick("notes", "comment", "memo", "description")
+    strategy_col = pick("strategy", "tag", "category", "label", "setup")
+
+    rows = []
+    for _, row in df.iterrows():
+        try:
+            date_val = row[date_col] if date_col else datetime.date.today().isoformat()
+            try:
+                date_parsed = pd.to_datetime(date_val)
+                date_str = date_parsed.date().isoformat()
+            except Exception:
+                date_str = str(date_val)
+
+            ticker_val = str(row[symbol_col]).upper().strip() if symbol_col else ""
+            side_raw = str(row[side_col]).strip().lower() if side_col else ""
+            if "buy" in side_raw or "long" in side_raw:
+                side_val = "Long"
+            elif "sell" in side_raw or "short" in side_raw:
+                side_val = "Short"
+            else:
+                side_val = "Long"
+
+            qty_val = float(row[qty_col]) if qty_col and pd.notna(row[qty_col]) else 0.0
+            entry_val = float(row[entry_col]) if entry_col and pd.notna(row[entry_col]) else 0.0
+            exit_val = float(row[exit_col]) if exit_col and pd.notna(row[exit_col]) else entry_val
+
+            if pnl_col and pd.notna(row[pnl_col]):
+                pnl_val = float(row[pnl_col])
+            else:
+                pnl_val = (exit_val - entry_val) * qty_val if side_val == "Long" else (entry_val - exit_val) * qty_val
+
+            strategy_val = str(row[strategy_col]).strip() if strategy_col and pd.notna(row[strategy_col]) else ""
+            notes_val = str(row[notes_col]).strip() if notes_col and pd.notna(row[notes_col]) else ""
+
+            if ticker_val:
+                rows.append({
+                    "date": date_str,
+                    "ticker": ticker_val,
+                    "side": side_val,
+                    "quantity": qty_val,
+                    "entry_price": entry_val,
+                    "exit_price": exit_val,
+                    "pnl": pnl_val,
+                    "strategy": strategy_val,
+                    "notes": notes_val,
+                })
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows)
+
+
 init_db()
 
 st.set_page_config(page_title="Trading Journal", layout="wide")
@@ -313,7 +382,7 @@ with main_tab:
     st.dataframe(df, use_container_width=True)
 
 with trade_tab:
-    st.subheader("Log a Trade")
+    st.subheader("Log a Trade (Manual)")
     with st.form("trade_form", clear_on_submit=True):
         col1, col2, col3 = st.columns(3)
         date = col1.date_input("Date", datetime.date.today())
@@ -329,6 +398,54 @@ with trade_tab:
             log_trade(st.session_state.user_id, str(date), ticker.upper(), side, qty, entry, exitp, pnl, strategy, notes)
             st.success(f"Trade saved. P&L: ${pnl:,.2f}")
 
+    st.markdown("---")
+    st.subheader("Bulk Import Trades from Broker (CSV or Excel)")
+    uploaded_file = st.file_uploader(
+        "Upload your trade history file",
+        type=["csv", "xls", "xlsx"],
+        help="Export your fills/order history from your broker or exchange and upload it here."
+    )
+
+    if uploaded_file is not None:
+        ext = uploaded_file.name.split(".")[-1].lower()
+        try:
+            if ext == "csv":
+                df_raw = pd.read_csv(uploaded_file)
+            else:
+                df_raw = pd.read_excel(uploaded_file)
+        except Exception as e:
+            df_raw = None
+            st.error(f"Could not read file: {e}")
+
+        if df_raw is not None:
+            st.write("Uploaded file preview:")
+            st.dataframe(df_raw.head(), use_container_width=True)
+
+            df_norm = normalize_broker_df(df_raw)
+
+            if df_norm.empty:
+                st.warning("No trades could be mapped from this file. We may need to customize the importer for your broker.")
+            else:
+                st.write("Mapped trades preview:")
+                st.dataframe(df_norm.head(), use_container_width=True)
+
+                if st.button("Import all mapped trades"):
+                    for _, r in df_norm.iterrows():
+                        log_trade(
+                            st.session_state.user_id,
+                            r["date"],
+                            r["ticker"],
+                            r["side"],
+                            float(r["quantity"]),
+                            float(r["entry_price"]),
+                            float(r["exit_price"]),
+                            float(r["pnl"]),
+                            r["strategy"],
+                            r["notes"],
+                        )
+                    st.success(f"Imported {len(df_norm)} trades into your journal.")
+                    st.rerun()
+
     conn = get_conn()
     df_trades = pd.read_sql(
         "SELECT date, ticker, side, quantity, entry_price, exit_price, pnl, strategy, notes FROM trades WHERE user_id = ? ORDER BY id DESC",
@@ -336,6 +453,7 @@ with trade_tab:
         params=(st.session_state.user_id,)
     )
     conn.close()
+    st.subheader("Your Trades")
     st.dataframe(df_trades, use_container_width=True)
 
 with watch_tab:
