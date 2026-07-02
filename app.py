@@ -4,6 +4,7 @@ import datetime
 import requests
 import re
 import calendar
+import yfinance as yf
 from supabase import create_client
 
 st.set_page_config(page_title="Trading Journal", layout="wide")
@@ -232,6 +233,64 @@ def get_watchlist_df(user_id):
     if not df.empty:
         df = df.rename(columns={"symbol": "ticker"})
     return df
+
+
+@st.cache_data(ttl=300)
+def fetch_quotes(symbols):
+    results = []
+    for symbol in symbols:
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="2d", interval="1d", auto_adjust=False)
+            info = ticker.fast_info
+
+            if hist is not None and len(hist) >= 2:
+                current_price = float(hist["Close"].iloc[-1])
+                previous_close = float(hist["Close"].iloc[-2])
+            elif hist is not None and len(hist) == 1:
+                current_price = float(hist["Close"].iloc[-1])
+                previous_close = float(info.get("previous_close", current_price))
+            else:
+                current_price = float(info.get("last_price", 0))
+                previous_close = float(info.get("previous_close", current_price))
+
+            change = current_price - previous_close
+            change_pct = (change / previous_close * 100) if previous_close else 0.0
+
+            results.append({
+                "symbol": symbol,
+                "price": current_price,
+                "change": change,
+                "change_pct": change_pct
+            })
+        except Exception:
+            results.append({
+                "symbol": symbol,
+                "price": None,
+                "change": None,
+                "change_pct": None
+            })
+    return results
+
+
+def render_quote_cards(title, quote_list):
+    st.markdown(f"### {title}")
+    if not quote_list:
+        st.info("No symbols available.")
+        return
+
+    cols = st.columns(len(quote_list))
+    for col, q in zip(cols, quote_list):
+        with col:
+            if q["price"] is None:
+                st.metric(q["symbol"], "N/A", "Unavailable")
+            else:
+                delta_text = f"{q['change']:+.2f} ({q['change_pct']:+.2f}%)"
+                st.metric(
+                    q["symbol"],
+                    f"{q['price']:.2f}",
+                    delta_text
+                )
 
 
 def ask_openai_compatible(prompt, api_key, base_url, model, system_prompt):
@@ -541,6 +600,37 @@ account_size = st.sidebar.number_input("Account Size ($) for % calendar", min_va
 if st.sidebar.button("Log out"):
     sign_out_user()
     st.rerun()
+
+try:
+    df_watch_for_top = get_watchlist_df(st.session_state.user_id)
+except Exception:
+    df_watch_for_top = pd.DataFrame()
+
+market_symbols = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
+market_quotes = fetch_quotes(market_symbols)
+
+watch_symbols = []
+if not df_watch_for_top.empty and "ticker" in df_watch_for_top.columns:
+    watch_symbols = (
+        df_watch_for_top["ticker"]
+        .dropna()
+        .astype(str)
+        .str.upper()
+        .drop_duplicates()
+        .head(5)
+        .tolist()
+    )
+
+watch_quotes = fetch_quotes(watch_symbols) if watch_symbols else []
+
+st.subheader("Market Overview")
+render_quote_cards("Major Market Signals", market_quotes)
+if watch_quotes:
+    render_quote_cards("Watchlist Movers", watch_quotes)
+else:
+    st.info("Add some watchlist symbols to show their price action here.")
+
+st.markdown("---")
 
 strategy_tab, trade_tab, watch_tab, analytics_tab, calendar_tab, ai_tab = st.tabs([
     "My Strategy", "Trades", "Watchlist", "Analytics", "Calendar", "AI Assistant"
