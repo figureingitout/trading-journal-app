@@ -37,22 +37,24 @@ st.markdown("""
     max-width: 96rem;
 }
 
-/* Top header: clock + title */
+/* Top header: title + clock */
 .app-header {
     display: flex;
     align-items: baseline;
+    justify-content: space-between;
     gap: 1rem;
     margin-bottom: 0.75rem;
 }
-.app-header-left {
+.app-header-left h1 {
+    margin: 0;
+}
+.app-header-right {
+    text-align: right;
     font-size: 0.9rem;
     color: #9ca3af;
 }
-.app-header-left strong {
+.app-header-right strong {
     color: #e5e7eb;
-}
-.app-header-right h1 {
-    margin: 0;
 }
 .app-header-status {
     font-size: 0.8rem;
@@ -230,7 +232,6 @@ def db_ready():
 def fetch_table_columns(table_name: str):
     if not db_ready():
         return []
-    # Basic best-effort schema detection via sample row
     try:
         sample = supabase.table(table_name).select("*").limit(1).execute()
         rows = getattr(sample, "data", None) or []
@@ -290,7 +291,7 @@ def get_trades_df():
             df["followed_plan"] = df["followed_plan"].astype("boolean")
 
         return df[DEFAULT_TRADE_COLUMNS], None
-    except Exception as e:
+    except Exception:
         # Friendly empty state instead of technical error
         return empty, "Nothing here yet. Add a trade to get started."
 
@@ -307,7 +308,7 @@ def get_watchlist_df():
         res = supabase.table("watchlist").select(",".join(cols) if cols else "*").order("created_at", desc=True).execute()
         rows = getattr(res, "data", None) or []
         df = pd.DataFrame(rows)
-    except Exception as e:
+    except Exception:
         return empty, "Nothing here yet. Add a symbol to get started."
 
     for c in WATCHLIST_COLUMNS:
@@ -408,7 +409,6 @@ def daily_calendar_agg(trades_df: pd.DataFrame):
 
     out = g.merge(follow_ratio, on="date", how="left")
 
-    # Daily percentage move: you can plug in your account base here if desired
     base_capital = 20000.0
     out["daily_pct"] = out["daily_net_pnl"] / base_capital * 100.0
 
@@ -449,7 +449,6 @@ def render_calendar_grid(year: int, month: int, cal_df: pd.DataFrame):
 
                 d = date(year, month, day)
                 row = day_map.get(d, None)
-
                 is_today = (d == today)
 
                 if row is None:
@@ -511,12 +510,11 @@ def trades_metrics(df: pd.DataFrame):
     trades = len(work)
     wins = int((work["pnl"] > 0).sum())
 
-    base_capital = 20000.0  # adjust to your true account base
+    base_capital = 20000.0
 
     net_pnl = float(work["pnl"].sum())
     net_pct = net_pnl / base_capital * 100.0
 
-    # Daily P&L (today only)
     today = datetime.now().date()
     if "trade_date" in work.columns:
         today_rows = work[pd.to_datetime(work["trade_date"], errors="coerce").dt.date == today]
@@ -589,7 +587,6 @@ def setup_pnl_chart(df: pd.DataFrame):
 
 
 def get_futures_snapshot(symbols):
-    # Placeholder row; connect to real data later
     rows = []
     for s in symbols:
         rows.append({
@@ -602,16 +599,13 @@ def get_futures_snapshot(symbols):
 
 
 def get_local_now():
-    # Get aware datetime in local system timezone
     return datetime.now(timezone.utc).astimezone()
 
 
 def market_status_and_countdown():
     now_local = get_local_now()
 
-    # Fixed market reference timezone: Eastern
-    et = timezone(timedelta(hours=-4))  # works for current daylight period
-
+    et = timezone(timedelta(hours=-4))  # simple ET offset
     now_et = now_local.astimezone(et)
     today_et = now_et.date()
 
@@ -646,29 +640,32 @@ trades_df, trades_msg = get_trades_df()
 watchlist_df, watchlist_msg = get_watchlist_df()
 
 # =========================
-# Header (clock + date + market status)
+# Header (title left, clock + date + market status right)
 # =========================
 now_local, market_status, countdown, ding = market_status_and_countdown()
 date_str = now_local.strftime("%a, %b %-d, %Y") if hasattr(now_local, "strftime") else ""
 time_str = now_local.strftime("%-I:%M %p") if hasattr(now_local, "strftime") else ""
 
+status_line = market_status
+if countdown:
+    mins = int(countdown.total_seconds() // 60)
+    secs = int(countdown.total_seconds() % 60)
+    status_line = f"{market_status} {mins:02d}:{secs:02d}"
+
 header_html = f"""
 <div class="app-header">
   <div class="app-header-left">
-    <div><strong>{time_str}</strong> • {date_str}</div>
-    <div class="app-header-status">
-      {market_status}{(" " + f"{int(countdown.total_seconds()//60):02d}:{int(countdown.total_seconds()%60):02d}") if countdown else ""}
-    </div>
+    <h1>Trading Journal</h1>
   </div>
   <div class="app-header-right">
-    <h1>Trading Journal</h1>
+    <div><strong>{time_str}</strong> • {date_str}</div>
+    <div class="app-header-status">{status_line}</div>
   </div>
 </div>
 """
 
 st.markdown(header_html, unsafe_allow_html=True)
 
-# Play ding at market open (simple placeholder)
 if ding:
     st.audio("https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg")
 
@@ -688,14 +685,15 @@ tab_dashboard, tab_trades, tab_watchlist, tab_calendar = st.tabs(
 with tab_dashboard:
     metrics = trades_metrics(trades_df)
 
-    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
-    m1.metric("Net P&L", format_money(metrics["net_pnl"]), f"{metrics['net_pct']:+.2f}%")
-    m2.metric("Gross P&L", format_money(metrics["gross_pnl"]))
-    m3.metric("Commissions", format_money(metrics["commissions"]))
-    m4.metric("Trades", f"{metrics['trades']}")
-    m5.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
-    m6.metric("Avg Trade", format_money(metrics["avg_trade"]))
-    m7.metric("Daily P&L", format_money(metrics["daily_pnl"]), f"{metrics['daily_pct']:+.2f}%")
+    # Order: 5,2,3,1,4,6,7
+    m_trades, m_net, m_gross, m_daily, m_comm, m_win, m_avg = st.columns(7)
+    m_trades.metric("Trades", f"{metrics['trades']}")
+    m_net.metric("Net P&L", format_money(metrics["net_pnl"]), f"{metrics['net_pct']:+.2f}%")
+    m_gross.metric("Gross P&L", format_money(metrics["gross_pnl"]))
+    m_daily.metric("Daily P&L", format_money(metrics["daily_pnl"]), f"{metrics['daily_pct']:+.2f}%")
+    m_comm.metric("Commissions", format_money(metrics["commissions"]))
+    m_win.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
+    m_avg.metric("Avg Trade", format_money(metrics["avg_trade"]))
 
     c1, c2 = st.columns(2)
     with c1:
@@ -786,7 +784,6 @@ with tab_trades:
                 else:
                     st.error(f"Delete failed: {msg}")
 
-    # Manual import above manual entry (placeholder section)
     st.markdown("### Manual import")
     st.info("Manual import will go here (e.g., file upload / broker export).")
 
@@ -817,15 +814,13 @@ with tab_trades:
         st.dataframe(display_df, use_container_width=True, height=420)
 
 # =========================
-# Watchlist (combined ideas + prep + futures mini-charts)
+# Watchlist
 # =========================
 with tab_watchlist:
     st.subheader("Watchlist")
 
-    # Mini futures charts row at top, kept small and side by side
     st.markdown("<div class='futures-mini-row'>", unsafe_allow_html=True)
     fc1, fc2, fc3 = st.columns(3)
-    symbols_text = ", ".join(FUTURES_SYMBOLS_DEFAULT)
     fut_df = get_futures_snapshot(FUTURES_SYMBOLS_DEFAULT)
     with fc1:
         st.markdown("<div class='futures-mini-title'>Market context</div>", unsafe_allow_html=True)
@@ -839,11 +834,11 @@ with tab_watchlist:
             label_visibility="collapsed",
         )
     with fc3:
-        st.markdown("<div class='futures-mini-title'>Symbols", unsafe_allow_html=True)
+        st.markdown("<div class='futures-mini-title'>Symbols</div>", unsafe_allow_html=True)
+        symbols_text = ", ".join(FUTURES_SYMBOLS_DEFAULT)
         st.text_input("Symbols", value=symbols_text, label_visibility="collapsed")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Watchlist top controls
     st.markdown("<div class='watchlist-top'>", unsafe_allow_html=True)
     top1, top2, top3, top4, top5 = st.columns([1.2, 1.2, 1.6, 1.2, 1.0])
     with top1:
@@ -956,7 +951,7 @@ with tab_calendar:
     try:
         if trades_df is not None and not trades_df.empty:
             cal_df = daily_calendar_agg(trades_df)
-    except Exception as e:
+    except Exception:
         cal_notice = "Trade data could not be overlaid on the calendar."
 
     render_calendar_grid(year, month, cal_df)
