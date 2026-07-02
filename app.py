@@ -151,6 +151,15 @@ def get_strategies_df(user_id):
     return pd.DataFrame(response.data if response.data else [])
 
 
+def delete_strategy(strategy_id):
+    (
+        supabase.table("strategies")
+        .delete()
+        .eq("id", strategy_id)
+        .execute()
+    )
+
+
 def log_trade(user_id, date, entry_time, exit_time, ticker, side, qty, entry, exitp, strategy, followed_plan, notes):
     pnl = (exitp - entry) * qty if side == "Long" else (entry - exitp) * qty
     percent_gain = compute_percent_gain(side, entry, exitp)
@@ -178,7 +187,7 @@ def log_trade(user_id, date, entry_time, exit_time, ticker, side, qty, entry, ex
 def get_trades_df(user_id):
     response = (
         supabase.table("trades")
-        .select("trade_date,entry_time,exit_time,symbol,side,quantity,entry_price,exit_price,pnl,percent_gain,followed_plan,notes")
+        .select("id,trade_date,entry_time,exit_time,symbol,side,quantity,entry_price,exit_price,pnl,percent_gain,followed_plan,notes")
         .eq("user_id", user_id)
         .order("trade_date", desc=True)
         .order("entry_time", desc=True)
@@ -192,6 +201,15 @@ def get_trades_df(user_id):
         })
         df["side"] = df["side"].fillna("").str.title()
     return df
+
+
+def delete_trade(trade_id):
+    (
+        supabase.table("trades")
+        .delete()
+        .eq("id", trade_id)
+        .execute()
+    )
 
 
 def add_watchlist(user_id, ticker, reason):
@@ -565,6 +583,29 @@ with strategy_tab:
             ]
             st.subheader("Saved Strategies")
             st.dataframe(df_strat[display_cols], use_container_width=True)
+
+            st.markdown("### Delete a Strategy")
+            strategy_delete_options = {
+                f"{row['name']} | {row.get('setup_type', '')} | {row.get('market_type', '')}": row["id"]
+                for _, row in df_strat.iterrows()
+            }
+            strategy_to_delete_label = st.selectbox(
+                "Choose a strategy to delete",
+                [""] + list(strategy_delete_options.keys())
+            )
+            confirm_delete_strategy = st.checkbox("I understand this will permanently delete the selected strategy.")
+            if st.button("Delete Selected Strategy", type="secondary"):
+                if not strategy_to_delete_label:
+                    st.warning("Pick a strategy first.")
+                elif not confirm_delete_strategy:
+                    st.warning("Please confirm deletion first.")
+                else:
+                    try:
+                        delete_strategy(strategy_delete_options[strategy_to_delete_label])
+                        st.success("Strategy deleted.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not delete strategy: {e}")
         else:
             st.info("No strategies saved yet.")
     except Exception as e:
@@ -661,9 +702,37 @@ with trade_tab:
     try:
         df_trades = get_trades_df(st.session_state.user_id)
         if not df_trades.empty:
-            df_trades["followed_plan"] = df_trades["followed_plan"].map({True: "Yes", False: "No", 1: "Yes", 0: "No"})
-        st.subheader("Your Trades")
-        st.dataframe(df_trades, use_container_width=True)
+            df_display = df_trades.copy()
+            df_display["followed_plan"] = df_display["followed_plan"].map({True: "Yes", False: "No", 1: "Yes", 0: "No"})
+            st.subheader("Your Trades")
+            st.dataframe(df_display.drop(columns=["id"]), use_container_width=True)
+
+            st.markdown("### Delete a Trade")
+            trade_delete_options = {}
+            for _, row in df_trades.iterrows():
+                label = f"{row['date']} | {row['ticker']} | {row['side']} | P&L ${float(row['pnl']):,.2f}"
+                trade_delete_options[label] = row["id"]
+
+            trade_to_delete_label = st.selectbox(
+                "Choose a trade to delete",
+                [""] + list(trade_delete_options.keys())
+            )
+            confirm_delete_trade = st.checkbox("I understand this will permanently delete the selected trade.")
+            if st.button("Delete Selected Trade", type="secondary"):
+                if not trade_to_delete_label:
+                    st.warning("Pick a trade first.")
+                elif not confirm_delete_trade:
+                    st.warning("Please confirm deletion first.")
+                else:
+                    try:
+                        delete_trade(trade_delete_options[trade_to_delete_label])
+                        st.success("Trade deleted.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not delete trade: {e}")
+        else:
+            st.subheader("Your Trades")
+            st.info("No trades logged yet.")
     except Exception as e:
         st.error(f"Could not load trades: {e}")
 
