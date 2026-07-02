@@ -1,160 +1,22 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import datetime
 import requests
-import hashlib
 import re
 import calendar
+from supabase import create_client
 
-DB_PATH = "trading_journal.db"
+st.set_page_config(page_title="Trading Journal", layout="wide")
 
-
-def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
-
-
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
-
-
-def table_columns(conn, table_name):
-    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    return [row[1] for row in rows]
-
-
-def add_column_if_missing(conn, table_name, column_name, column_def):
-    cols = table_columns(conn, table_name)
-    if column_name not in cols:
-        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
-
-
-def init_db():
-    conn = get_conn()
-    c = conn.cursor()
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT UNIQUE,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        marketing_opt_in INTEGER DEFAULT 0,
-        created_at TEXT NOT NULL
-    )
-    """)
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS strategies (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        market_type TEXT,
-        setup_type TEXT,
-        time_of_day TEXT,
-        market_conditions TEXT,
-        entry_criteria TEXT,
-        exit_criteria TEXT,
-        risk_rules TEXT,
-        checklist TEXT,
-        notes TEXT,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES users(id)
-    )
-    """)
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        date TEXT,
-        entry_time TEXT,
-        exit_time TEXT,
-        ticker TEXT,
-        side TEXT,
-        quantity REAL,
-        entry_price REAL,
-        exit_price REAL,
-        pnl REAL,
-        percent_gain REAL,
-        strategy TEXT,
-        followed_plan INTEGER DEFAULT 1,
-        notes TEXT,
-        FOREIGN KEY(user_id) REFERENCES users(id)
-    )
-    """)
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS watchlist (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        ticker TEXT,
-        reason TEXT,
-        date_added TEXT,
-        FOREIGN KEY(user_id) REFERENCES users(id)
-    )
-    """)
-
-    add_column_if_missing(conn, "users", "email", "TEXT")
-    add_column_if_missing(conn, "users", "marketing_opt_in", "INTEGER DEFAULT 0")
-    add_column_if_missing(conn, "users", "created_at", "TEXT")
-
-    add_column_if_missing(conn, "trades", "entry_time", "TEXT")
-    add_column_if_missing(conn, "trades", "exit_time", "TEXT")
-    add_column_if_missing(conn, "trades", "percent_gain", "REAL")
-    add_column_if_missing(conn, "trades", "followed_plan", "INTEGER DEFAULT 1")
-
-    conn.commit()
-    conn.close()
+supabase = create_client(
+    st.secrets["SUPABASE_URL"],
+    st.secrets["SUPABASE_KEY"]
+)
 
 
 def valid_email(email: str) -> bool:
     pattern = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
     return re.match(pattern, email.strip()) is not None
-
-
-def create_user(email: str, username: str, password: str, marketing_opt_in: bool):
-    conn = get_conn()
-    try:
-        conn.execute(
-            """
-            INSERT INTO users (email, username, password_hash, marketing_opt_in, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                email.strip().lower(),
-                username.strip().lower(),
-                hash_password(password),
-                1 if marketing_opt_in else 0,
-                datetime.datetime.now().isoformat()
-            )
-        )
-        conn.commit()
-        return True, "Account created successfully."
-    except sqlite3.IntegrityError as e:
-        msg = str(e).lower()
-        if "email" in msg:
-            return False, "That email is already registered."
-        if "username" in msg:
-            return False, "That username already exists."
-        return False, "Unable to create account."
-    finally:
-        conn.close()
-
-
-def authenticate_user(login_value: str, password: str):
-    conn = get_conn()
-    value = login_value.strip().lower()
-    row = conn.execute(
-        """
-        SELECT id, username, email
-        FROM users
-        WHERE (username = ? OR email = ?) AND password_hash = ?
-        """,
-        (value, value, hash_password(password))
-    ).fetchone()
-    conn.close()
-    return row
 
 
 def compute_percent_gain(side, entry_price, exit_price):
@@ -163,64 +25,195 @@ def compute_percent_gain(side, entry_price, exit_price):
     try:
         if side == "Long":
             return ((exit_price - entry_price) / entry_price) * 100
-        else:
-            return ((entry_price - exit_price) / entry_price) * 100
+        return ((entry_price - exit_price) / entry_price) * 100
     except Exception:
         return 0.0
 
 
+def ensure_session_state():
+    defaults = {
+        "logged_in": False,
+        "user_id": None,
+        "username": None,
+        "email": None,
+        "access_token": None,
+        "refresh_token": None,
+        "ai_history": [],
+        "user_api_key": ""
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def sync_supabase_session():
+    if st.session_state.access_token and st.session_state.refresh_token:
+        try:
+            supabase.auth.set_session(
+                st.session_state.access_token,
+                st.session_state.refresh_token
+            )
+            user_resp = supabase.auth.get_user()
+            user = user_resp.user
+            if user:
+                st.session_state.logged_in = True
+                st.session_state.user_id = user.id
+                st.session_state.email = getattr(user, "email", "")
+                username = ""
+                meta = getattr(user, "user_metadata", {}) or {}
+                if isinstance(meta, dict):
+                    username = meta.get("username", "")
+                st.session_state.username = username or st.session_state.email or "User"
+                return
+        except Exception:
+            pass
+
+    st.session_state.logged_in = False
+    st.session_state.user_id = None
+    st.session_state.username = None
+    st.session_state.email = None
+
+
+def sign_up_user(email: str, username: str, password: str):
+    response = supabase.auth.sign_up({
+        "email": email.strip().lower(),
+        "password": password,
+        "options": {
+            "data": {
+                "username": username.strip()
+            }
+        }
+    })
+    return response
+
+
+def sign_in_user(login_value: str, password: str):
+    response = supabase.auth.sign_in_with_password({
+        "email": login_value.strip().lower(),
+        "password": password
+    })
+    return response
+
+
+def sign_out_user():
+    try:
+        supabase.auth.sign_out()
+    except Exception:
+        pass
+    st.session_state.logged_in = False
+    st.session_state.user_id = None
+    st.session_state.username = None
+    st.session_state.email = None
+    st.session_state.access_token = None
+    st.session_state.refresh_token = None
+    st.session_state.ai_history = []
+    st.session_state.user_api_key = ""
+
+
+def save_profile_if_needed(user_id: str, email: str, username: str):
+    try:
+        existing = supabase.table("profiles").select("id").eq("id", user_id).execute()
+        if not existing.data:
+            supabase.table("profiles").insert({
+                "id": user_id,
+                "email": email,
+                "full_name": username
+            }).execute()
+    except Exception:
+        pass
+
+
 def add_strategy(user_id, name, market_type, setup_type, time_of_day, market_conditions,
                  entry_criteria, exit_criteria, risk_rules, checklist, notes):
-    conn = get_conn()
-    conn.execute(
-        """
-        INSERT INTO strategies (
-            user_id, name, market_type, setup_type, time_of_day, market_conditions,
-            entry_criteria, exit_criteria, risk_rules, checklist, notes, created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            user_id, name, market_type, setup_type, time_of_day, market_conditions,
-            entry_criteria, exit_criteria, risk_rules, checklist, notes,
-            datetime.datetime.now().isoformat()
-        )
+    supabase.table("strategies").insert({
+        "user_id": user_id,
+        "name": name,
+        "market_type": market_type,
+        "setup_type": setup_type,
+        "time_of_day": time_of_day,
+        "market_conditions": market_conditions,
+        "entry_criteria": entry_criteria,
+        "exit_criteria": exit_criteria,
+        "risk_rules": risk_rules,
+        "checklist": checklist,
+        "notes": notes
+    }).execute()
+
+
+def get_strategies_df(user_id):
+    response = (
+        supabase.table("strategies")
+        .select("id,name,market_type,setup_type,time_of_day,market_conditions,entry_criteria,exit_criteria,risk_rules,checklist,notes,created_at")
+        .eq("user_id", user_id)
+        .order("id", desc=True)
+        .execute()
     )
-    conn.commit()
-    conn.close()
+    return pd.DataFrame(response.data if response.data else [])
 
 
 def log_trade(user_id, date, entry_time, exit_time, ticker, side, qty, entry, exitp, strategy, followed_plan, notes):
     pnl = (exitp - entry) * qty if side == "Long" else (entry - exitp) * qty
     percent_gain = compute_percent_gain(side, entry, exitp)
 
-    conn = get_conn()
-    conn.execute(
-        """
-        INSERT INTO trades (
-            user_id, date, entry_time, exit_time, ticker, side, quantity,
-            entry_price, exit_price, pnl, percent_gain, strategy, followed_plan, notes
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            user_id, date, entry_time, exit_time, ticker, side, qty,
-            entry, exitp, pnl, percent_gain, strategy, 1 if followed_plan else 0, notes
-        )
-    )
-    conn.commit()
-    conn.close()
+    supabase.table("trades").insert({
+        "user_id": user_id,
+        "trade_date": str(date),
+        "entry_time": entry_time,
+        "exit_time": exit_time,
+        "symbol": ticker,
+        "asset_type": "",
+        "side": side.lower(),
+        "quantity": qty,
+        "entry_price": entry,
+        "exit_price": exitp,
+        "pnl": pnl,
+        "percent_gain": percent_gain,
+        "followed_plan": followed_plan,
+        "notes": notes
+    }).execute()
+
     return pnl, percent_gain
 
 
-def add_watchlist(user_id, ticker, reason):
-    conn = get_conn()
-    conn.execute(
-        "INSERT INTO watchlist (user_id, ticker, reason, date_added) VALUES (?,?,?,?)",
-        (user_id, ticker, reason, datetime.date.today().isoformat())
+def get_trades_df(user_id):
+    response = (
+        supabase.table("trades")
+        .select("trade_date,entry_time,exit_time,symbol,side,quantity,entry_price,exit_price,pnl,percent_gain,followed_plan,notes")
+        .eq("user_id", user_id)
+        .order("trade_date", desc=True)
+        .order("entry_time", desc=True)
+        .execute()
     )
-    conn.commit()
-    conn.close()
+    df = pd.DataFrame(response.data if response.data else [])
+    if not df.empty:
+        df = df.rename(columns={
+            "trade_date": "date",
+            "symbol": "ticker"
+        })
+        df["side"] = df["side"].fillna("").str.title()
+    return df
+
+
+def add_watchlist(user_id, ticker, reason):
+    supabase.table("watchlist").insert({
+        "user_id": user_id,
+        "symbol": ticker,
+        "reason": reason
+    }).execute()
+
+
+def get_watchlist_df(user_id):
+    response = (
+        supabase.table("watchlist")
+        .select("symbol,reason,date_added")
+        .eq("user_id", user_id)
+        .order("id", desc=True)
+        .execute()
+    )
+    df = pd.DataFrame(response.data if response.data else [])
+    if not df.empty:
+        df = df.rename(columns={"symbol": "ticker"})
+    return df
 
 
 def ask_openai_compatible(prompt, api_key, base_url, model, system_prompt):
@@ -343,13 +336,33 @@ def normalize_broker_df(df_raw: pd.DataFrame) -> pd.DataFrame:
                     "pnl": pnl_val,
                     "percent_gain": percent_val,
                     "strategy": strategy_val,
-                    "followed_plan": 1,
+                    "followed_plan": True,
                     "notes": notes_val,
                 })
         except Exception:
             continue
 
     return pd.DataFrame(rows)
+
+
+def import_trades(user_id, df_norm):
+    for _, r in df_norm.iterrows():
+        supabase.table("trades").insert({
+            "user_id": user_id,
+            "trade_date": r["date"],
+            "entry_time": r["entry_time"],
+            "exit_time": r["exit_time"],
+            "symbol": r["ticker"],
+            "asset_type": "",
+            "side": r["side"].lower(),
+            "quantity": float(r["quantity"]),
+            "entry_price": float(r["entry_price"]),
+            "exit_price": float(r["exit_price"]),
+            "pnl": float(r["pnl"]),
+            "percent_gain": float(r["percent_gain"]),
+            "followed_plan": bool(r["followed_plan"]),
+            "notes": r["notes"]
+        }).execute()
 
 
 def render_calendar(day_df, selected_year, selected_month):
@@ -379,9 +392,6 @@ def render_calendar(day_df, selected_year, selected_month):
     .small {font-size:0.75rem;opacity:0.95;}
     </style>
     """, unsafe_allow_html=True)
-
-    for name in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
-        pass
 
     header_html = '<div class="calendar-grid">' + "".join(
         [f'<div class="calendar-head">{d}</div>' for d in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]]
@@ -427,22 +437,8 @@ def render_calendar(day_df, selected_year, selected_month):
     st.markdown(header_html + tiles + footer, unsafe_allow_html=True)
 
 
-init_db()
-
-st.set_page_config(page_title="Trading Journal", layout="wide")
-
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "user_id" not in st.session_state:
-    st.session_state.user_id = None
-if "username" not in st.session_state:
-    st.session_state.username = None
-if "email" not in st.session_state:
-    st.session_state.email = None
-if "ai_history" not in st.session_state:
-    st.session_state.ai_history = []
-if "user_api_key" not in st.session_state:
-    st.session_state.user_api_key = ""
+ensure_session_state()
+sync_supabase_session()
 
 st.title("📈 Trading Journal")
 
@@ -452,20 +448,30 @@ if not st.session_state.logged_in:
     with login_tab:
         st.subheader("Login")
         with st.form("login_form"):
-            login_value = st.text_input("Email or Username")
+            login_email = st.text_input("Email")
             login_pass = st.text_input("Password", type="password")
             login_submit = st.form_submit_button("Login")
             if login_submit:
-                row = authenticate_user(login_value, login_pass)
-                if row:
+                try:
+                    resp = sign_in_user(login_email, login_pass)
+                    session = resp.session
+                    user = resp.user
+
+                    st.session_state.access_token = session.access_token
+                    st.session_state.refresh_token = session.refresh_token
                     st.session_state.logged_in = True
-                    st.session_state.user_id = row[0]
-                    st.session_state.username = row[1]
-                    st.session_state.email = row[2]
-                    st.success(f"Welcome back, {row[1]}!")
+                    st.session_state.user_id = user.id
+                    st.session_state.email = user.email
+
+                    meta = getattr(user, "user_metadata", {}) or {}
+                    username = meta.get("username", "") if isinstance(meta, dict) else ""
+                    st.session_state.username = username or user.email
+
+                    save_profile_if_needed(user.id, user.email, st.session_state.username)
+                    st.success(f"Welcome back, {st.session_state.username}!")
                     st.rerun()
-                else:
-                    st.error("Invalid email/username or password.")
+                except Exception as e:
+                    st.error(f"Login failed: {e}")
 
     with signup_tab:
         st.subheader("Create Account")
@@ -474,7 +480,6 @@ if not st.session_state.logged_in:
             new_user = st.text_input("Choose a username")
             new_pass = st.text_input("Choose a password", type="password")
             confirm_pass = st.text_input("Confirm password", type="password")
-            marketing_opt_in = st.checkbox("Email me product updates and trading journal tips")
             create_submit = st.form_submit_button("Create account")
 
             if create_submit:
@@ -487,11 +492,27 @@ if not st.session_state.logged_in:
                 elif new_pass != confirm_pass:
                     st.error("Passwords do not match.")
                 else:
-                    ok, msg = create_user(new_email, new_user, new_pass, marketing_opt_in)
-                    if ok:
-                        st.success(msg)
-                    else:
-                        st.error(msg)
+                    try:
+                        resp = sign_up_user(new_email, new_user, new_pass)
+                        user = resp.user
+                        session = resp.session
+
+                        if user:
+                            save_profile_if_needed(user.id, new_email.strip().lower(), new_user.strip())
+
+                        if session:
+                            st.session_state.access_token = session.access_token
+                            st.session_state.refresh_token = session.refresh_token
+                            st.session_state.logged_in = True
+                            st.session_state.user_id = user.id
+                            st.session_state.email = user.email
+                            st.session_state.username = new_user.strip()
+                            st.success("Account created successfully.")
+                            st.rerun()
+                        else:
+                            st.success("Account created. Check your email to confirm your account before logging in.")
+                    except Exception as e:
+                        st.error(f"Sign up failed: {e}")
 
     st.stop()
 
@@ -500,12 +521,7 @@ st.sidebar.caption(st.session_state.email if st.session_state.email else "")
 account_size = st.sidebar.number_input("Account Size ($) for % calendar", min_value=100.0, value=25000.0, step=100.0)
 
 if st.sidebar.button("Log out"):
-    st.session_state.logged_in = False
-    st.session_state.user_id = None
-    st.session_state.username = None
-    st.session_state.email = None
-    st.session_state.ai_history = []
-    st.session_state.user_api_key = ""
+    sign_out_user()
     st.rerun()
 
 strategy_tab, trade_tab, watch_tab, analytics_tab, calendar_tab, ai_tab = st.tabs([
@@ -530,37 +546,37 @@ with strategy_tab:
             if not name.strip():
                 st.error("Strategy name is required.")
             else:
-                add_strategy(
-                    st.session_state.user_id, name, market_type, setup_type, time_of_day,
-                    market_conditions, entry_criteria, exit_criteria, risk_rules, checklist, notes
-                )
-                st.success("Strategy saved.")
+                try:
+                    add_strategy(
+                        st.session_state.user_id, name, market_type, setup_type, time_of_day,
+                        market_conditions, entry_criteria, exit_criteria, risk_rules, checklist, notes
+                    )
+                    st.success("Strategy saved.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not save strategy: {e}")
 
-    conn = get_conn()
-    df_strat = pd.read_sql(
-        """
-        SELECT name, market_type, setup_type, time_of_day, market_conditions,
-               entry_criteria, exit_criteria, risk_rules, checklist, notes
-        FROM strategies
-        WHERE user_id = ?
-        ORDER BY id DESC
-        """,
-        conn,
-        params=(st.session_state.user_id,)
-    )
-    conn.close()
-    st.subheader("Saved Strategies")
-    st.dataframe(df_strat, use_container_width=True)
+    try:
+        df_strat = get_strategies_df(st.session_state.user_id)
+        if not df_strat.empty:
+            display_cols = [
+                "name", "market_type", "setup_type", "time_of_day", "market_conditions",
+                "entry_criteria", "exit_criteria", "risk_rules", "checklist", "notes"
+            ]
+            st.subheader("Saved Strategies")
+            st.dataframe(df_strat[display_cols], use_container_width=True)
+        else:
+            st.info("No strategies saved yet.")
+    except Exception as e:
+        st.error(f"Could not load strategies: {e}")
 
 with trade_tab:
     st.subheader("Log a Trade (Manual)")
-    conn = get_conn()
-    user_strategy_names = pd.read_sql(
-        "SELECT name FROM strategies WHERE user_id = ? ORDER BY name",
-        conn,
-        params=(st.session_state.user_id,)
-    )["name"].tolist()
-    conn.close()
+    try:
+        df_strategy_names = get_strategies_df(st.session_state.user_id)
+        user_strategy_names = sorted(df_strategy_names["name"].dropna().tolist()) if not df_strategy_names.empty else []
+    except Exception:
+        user_strategy_names = []
 
     strategy_options = [""] + user_strategy_names if user_strategy_names else [""]
 
@@ -584,21 +600,25 @@ with trade_tab:
         notes = st.text_area("Trade Notes")
 
         if st.form_submit_button("Save Trade"):
-            pnl, pct = log_trade(
-                st.session_state.user_id,
-                str(date),
-                entry_time.strftime("%H:%M"),
-                exit_time.strftime("%H:%M"),
-                ticker.upper(),
-                side,
-                qty,
-                entry,
-                exitp,
-                strategy,
-                followed_plan,
-                notes
-            )
-            st.success(f"Trade saved. P&L: ${pnl:,.2f} | Return: {pct:+.2f}%")
+            try:
+                pnl, pct = log_trade(
+                    st.session_state.user_id,
+                    str(date),
+                    entry_time.strftime("%H:%M"),
+                    exit_time.strftime("%H:%M"),
+                    ticker.upper(),
+                    side,
+                    qty,
+                    entry,
+                    exitp,
+                    strategy,
+                    followed_plan,
+                    notes
+                )
+                st.success(f"Trade saved. P&L: ${pnl:,.2f} | Return: {pct:+.2f}%")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not save trade: {e}")
 
     st.markdown("---")
     st.subheader("Bulk Import Trades from Broker (CSV or Excel)")
@@ -631,56 +651,21 @@ with trade_tab:
                 st.dataframe(df_norm.head(), use_container_width=True)
 
                 if st.button("Import all mapped trades"):
-                    for _, r in df_norm.iterrows():
-                        conn = get_conn()
-                        conn.execute(
-                            """
-                            INSERT INTO trades (
-                                user_id, date, entry_time, exit_time, ticker, side, quantity,
-                                entry_price, exit_price, pnl, percent_gain, strategy, followed_plan, notes
-                            )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                st.session_state.user_id,
-                                r["date"],
-                                r["entry_time"],
-                                r["exit_time"],
-                                r["ticker"],
-                                r["side"],
-                                float(r["quantity"]),
-                                float(r["entry_price"]),
-                                float(r["exit_price"]),
-                                float(r["pnl"]),
-                                float(r["percent_gain"]),
-                                r["strategy"],
-                                int(r["followed_plan"]),
-                                r["notes"],
-                            )
-                        )
-                        conn.commit()
-                        conn.close()
-                    st.success(f"Imported {len(df_norm)} trades.")
-                    st.rerun()
+                    try:
+                        import_trades(st.session_state.user_id, df_norm)
+                        st.success(f"Imported {len(df_norm)} trades.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Import failed: {e}")
 
-    conn = get_conn()
-    df_trades = pd.read_sql(
-        """
-        SELECT date, entry_time, exit_time, ticker, side, quantity,
-               entry_price, exit_price, pnl, percent_gain, strategy, followed_plan, notes
-        FROM trades
-        WHERE user_id = ?
-        ORDER BY date DESC, entry_time DESC
-        """,
-        conn,
-        params=(st.session_state.user_id,)
-    )
-    conn.close()
-
-    if not df_trades.empty:
-        df_trades["followed_plan"] = df_trades["followed_plan"].map({1: "Yes", 0: "No"})
-    st.subheader("Your Trades")
-    st.dataframe(df_trades, use_container_width=True)
+    try:
+        df_trades = get_trades_df(st.session_state.user_id)
+        if not df_trades.empty:
+            df_trades["followed_plan"] = df_trades["followed_plan"].map({True: "Yes", False: "No", 1: "Yes", 0: "No"})
+        st.subheader("Your Trades")
+        st.dataframe(df_trades, use_container_width=True)
+    except Exception as e:
+        st.error(f"Could not load trades: {e}")
 
 with watch_tab:
     st.subheader("Watchlist")
@@ -688,31 +673,26 @@ with watch_tab:
         wt = st.text_input("Ticker")
         wr = st.text_input("Reason")
         if st.form_submit_button("Add to Watchlist"):
-            add_watchlist(st.session_state.user_id, wt.upper(), wr)
-            st.success("Added!")
-    conn = get_conn()
-    df_watch = pd.read_sql(
-        "SELECT ticker, reason, date_added FROM watchlist WHERE user_id = ? ORDER BY id DESC",
-        conn,
-        params=(st.session_state.user_id,)
-    )
-    conn.close()
-    st.dataframe(df_watch, use_container_width=True)
+            try:
+                add_watchlist(st.session_state.user_id, wt.upper(), wr)
+                st.success("Added!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not add to watchlist: {e}")
+
+    try:
+        df_watch = get_watchlist_df(st.session_state.user_id)
+        st.dataframe(df_watch, use_container_width=True)
+    except Exception as e:
+        st.error(f"Could not load watchlist: {e}")
 
 with analytics_tab:
     st.subheader("Performance Analytics")
-    conn = get_conn()
-    df_analytics = pd.read_sql(
-        """
-        SELECT date, entry_time, ticker, side, pnl, percent_gain, strategy, followed_plan
-        FROM trades
-        WHERE user_id = ?
-        ORDER BY date, entry_time
-        """,
-        conn,
-        params=(st.session_state.user_id,)
-    )
-    conn.close()
+    try:
+        df_analytics = get_trades_df(st.session_state.user_id)
+    except Exception as e:
+        df_analytics = pd.DataFrame()
+        st.error(f"Could not load analytics: {e}")
 
     if not df_analytics.empty:
         total_pnl = df_analytics["pnl"].sum()
@@ -740,17 +720,8 @@ with analytics_tab:
             st.subheader("P&L by Hour of Day")
             st.bar_chart(hourly)
 
-        if df_analytics["strategy"].fillna("").ne("").any():
-            st.subheader("Performance by Strategy")
-            strat_stats = df_analytics.groupby("strategy", dropna=False).agg(
-                trades=("pnl", "count"),
-                total_pnl=("pnl", "sum"),
-                avg_pct=("percent_gain", "mean")
-            ).reset_index()
-            st.dataframe(strat_stats, use_container_width=True)
-
         st.subheader("Discipline Metrics")
-        followed_pct = (df_analytics["followed_plan"] == 1).mean() * 100
+        followed_pct = (df_analytics["followed_plan"].astype(str).isin(["True", "1"])).mean() * 100
         st.metric("Trades Following Plan", f"{followed_pct:.1f}%")
         st.write(f"Average % gain on winners: {avg_win_pct:+.2f}%")
         st.write(f"Average % gain on losers: {avg_loss_pct:+.2f}%")
@@ -759,17 +730,11 @@ with analytics_tab:
 
 with calendar_tab:
     st.subheader("Calendar View")
-    conn = get_conn()
-    df_cal = pd.read_sql(
-        """
-        SELECT date, pnl, percent_gain, followed_plan
-        FROM trades
-        WHERE user_id = ?
-        """,
-        conn,
-        params=(st.session_state.user_id,)
-    )
-    conn.close()
+    try:
+        df_cal = get_trades_df(st.session_state.user_id)
+    except Exception as e:
+        df_cal = pd.DataFrame()
+        st.error(f"Could not load calendar data: {e}")
 
     today = datetime.date.today()
     c1, c2 = st.columns(2)
