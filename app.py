@@ -375,8 +375,8 @@ def futures_chart(symbol: str):
     fig = px.line(df, x="time", y="price", title=f"{symbol} chart")
     fig.update_traces(line=dict(color=line_color, width=2))
     fig.update_layout(
-        height=160,
-        margin=dict(l=8, r=8, t=28, b=8),
+        height=140,
+        margin=dict(l=6, r=6, t=24, b=6),
         xaxis_title=None,
         yaxis_title=None,
         showlegend=False,
@@ -546,19 +546,26 @@ tab_dashboard, tab_trades, tab_watchlist, tab_calendar = st.tabs(
 with tab_dashboard:
     metrics = trades_metrics(trades_df)
 
-    # Simple fixed order: Trades, Daily P&L, Net P&L, Gross P&L, Commissions, Win Rate, Avg Trade
-    m_trades, m_daily, m_net, m_gross, m_comm, m_win, m_avg = st.columns(7)
-    m_trades.metric("Trades", f"{metrics['trades']}")
-    m_daily.metric("Daily P&L", format_money(metrics["daily_pnl"]), f"{metrics['daily_pct']:+.2f}%")
-    m_net.metric("Net P&L", format_money(metrics["net_pnl"]), f"{metrics['net_pct']:+.2f}%")
-    m_gross.metric("Gross P&L", format_money(metrics["gross_pnl"]))
-    m_comm.metric("Commissions", format_money(metrics["commissions"]))
-    m_win.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
-    m_avg.metric("Avg Trade", format_money(metrics["avg_trade"]))
+    # Left rail for futures charts, main dashboard content in center, tiny spacer on right
+    left_rail, main_col, right_spacer = st.columns([1, 4, 0.35])
 
-    main_col, side_col = st.columns([4, 1])
+    with left_rail:
+        st.markdown("#### Futures charts")
+        for sym in FUTURES_SYMBOLS_DEFAULT:
+            fig = futures_chart(sym)
+            st.plotly_chart(fig, use_container_width=True)
 
     with main_col:
+        # KPI order: Trades, Daily P&L, Net P&L, Gross P&L, Commissions, Win Rate, Avg Trade
+        m_trades, m_daily, m_net, m_gross, m_comm, m_win, m_avg = st.columns(7)
+        m_trades.metric("Trades", f"{metrics['trades']}")
+        m_daily.metric("Daily P&L", format_money(metrics["daily_pnl"]), f"{metrics['daily_pct']:+.2f}%")
+        m_net.metric("Net P&L", format_money(metrics["net_pnl"]), f"{metrics['net_pct']:+.2f}%")
+        m_gross.metric("Gross P&L", format_money(metrics["gross_pnl"]))
+        m_comm.metric("Commissions", format_money(metrics["commissions"]))
+        m_win.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
+        m_avg.metric("Avg Trade", format_money(metrics["avg_trade"]))
+
         c1, c2 = st.columns(2)
         with c1:
             fig_eq = equity_curve_chart(trades_df)
@@ -566,6 +573,7 @@ with tab_dashboard:
                 st.plotly_chart(fig_eq, use_container_width=True)
             else:
                 st.info("Nothing here yet. Add a trade to get started.")
+
         with c2:
             fig_month = monthly_pnl_chart(trades_df)
             if fig_month:
@@ -577,11 +585,8 @@ with tab_dashboard:
         if fig_setup:
             st.plotly_chart(fig_setup, use_container_width=True)
 
-    with side_col:
-        st.markdown("#### Futures charts")
-        for sym in FUTURES_SYMBOLS_DEFAULT:
-            fig = futures_chart(sym)
-            st.plotly_chart(fig, use_container_width=True)
+    with right_spacer:
+        st.empty()
 
 # =========================
 # Trades
