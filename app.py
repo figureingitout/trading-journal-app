@@ -185,6 +185,9 @@ def init_supabase():
 
 supabase: Client | None = init_supabase()
 
+user_response = supabase.auth.get_user() if supabase else None
+st.write("USER RESPONSE:", user_response)
+
 
 def db_ready():
     return supabase is not None
