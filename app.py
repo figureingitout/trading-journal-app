@@ -173,8 +173,19 @@ def ensure_datetime_col(df, col):
 
 
 def init_supabase():
-    url = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
-    key = st.secrets.get("SUPABASE_KEY", os.getenv("SUPABASE_KEY", ""))
+    url = os.getenv("SUPABASE_URL", "")
+    key = os.getenv("SUPABASE_KEY", "")
+
+    try:
+        url = st.secrets.get("SUPABASE_URL", url)
+    except Exception:
+        pass
+
+    try:
+        key = st.secrets.get("SUPABASE_KEY", key)
+    except Exception:
+        pass
+
     if not url or not key:
         return None
     try:
@@ -184,9 +195,6 @@ def init_supabase():
 
 
 supabase: Client | None = init_supabase()
-
-user_response = supabase.auth.get_user() if supabase else None
-st.write("USER RESPONSE:", user_response)
 
 
 def db_ready():
