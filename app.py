@@ -264,6 +264,39 @@ def get_watchlist_df():
     return df[WATCHLIST_COLUMNS], None
 
 
+def invalidate_cache():
+    get_trades_df.clear()
+    get_watchlist_df.clear()
+    fetch_table_columns.clear()
+
+
+def upsert_watchlist(payload, row_id=None):
+    if not db_ready():
+        return False, "Supabase is not configured."
+
+    try:
+        if row_id:
+            res = supabase.table("watchlist").update(payload).eq("id", row_id).execute()
+        else:
+            res = supabase.table("watchlist").insert(payload).execute()
+        invalidate_cache()
+        return True, res
+    except Exception as e:
+        return False, str(e)
+
+
+def delete_watchlist(row_id):
+    if not db_ready():
+        return False, "Supabase is not configured."
+
+    try:
+        res = supabase.table("watchlist").delete().eq("id", row_id).execute()
+        invalidate_cache()
+        return True, res
+    except Exception as e:
+        return False, str(e)
+
+
 def trades_metrics(df: pd.DataFrame):
     if df.empty:
         return {
@@ -718,8 +751,22 @@ with tab_watchlist:
     with top5:
         st.write("")
         st.write("")
-        st.button("Add to watchlist", use_container_width=True)
+        add_watch = st.button("Add to watchlist", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
+
+    if add_watch:
+        payload = {
+            "symbol": wl_symbol,
+            "bias": wl_bias,
+            "thesis": wl_thesis,
+            "status": wl_status,
+        }
+        ok, msg = upsert_watchlist(payload)
+        if ok:
+            st.success("Added to watchlist.")
+            st.rerun()
+        else:
+            st.error(f"Add failed: {msg}")
 
     if watchlist_msg:
         st.info(watchlist_msg)
@@ -728,6 +775,62 @@ with tab_watchlist:
         st.info("Nothing here yet. Add a symbol to get started.")
     else:
         st.dataframe(watchlist_df, use_container_width=True, height=420)
+
+        with st.expander("Edit / Delete Watchlist Item", expanded=False):
+            ids = watchlist_df["id"].dropna().tolist() if "id" in watchlist_df.columns else []
+            if ids:
+                row_id = st.selectbox("Select item ID", ids)
+                row = watchlist_df[watchlist_df["id"] == row_id].iloc[0].to_dict()
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    symbol = st.text_input("Symbol ", value=str(row.get("symbol", "")))
+                    bias = st.selectbox(
+                        "Bias ",
+                        ["Long", "Short", "Neutral"],
+                        index=["Long", "Short", "Neutral"].index(str(row.get("bias", "Neutral")))
+                        if str(row.get("bias", "Neutral")) in ["Long", "Short", "Neutral"] else 2
+                    )
+                    thesis = st.text_input("Thesis ", value="" if pd.isna(row.get("thesis")) else str(row.get("thesis", "")))
+                    status = st.selectbox(
+                        "Status ",
+                        ["Active", "Watching", "Triggered", "Closed"],
+                        index=["Active", "Watching", "Triggered", "Closed"].index(str(row.get("status", "Watching")))
+                        if str(row.get("status", "Watching")) in ["Active", "Watching", "Triggered", "Closed"] else 1
+                    )
+                with c2:
+                    entry_zone = st.text_input("Entry zone", value="" if pd.isna(row.get("entry_zone")) else str(row.get("entry_zone", "")))
+                    invalidate = st.text_input("Invalidate", value="" if pd.isna(row.get("invalidate")) else str(row.get("invalidate", "")))
+                    catalyst = st.text_input("Catalyst", value="" if pd.isna(row.get("catalyst")) else str(row.get("catalyst", "")))
+                    notes = st.text_area("Notes ", value="" if pd.isna(row.get("notes")) else str(row.get("notes", "")))
+
+                e1, e2 = st.columns(2)
+                with e1:
+                    if st.button("Save watchlist item", use_container_width=True):
+                        payload = {
+                            "symbol": symbol,
+                            "bias": bias,
+                            "thesis": thesis,
+                            "status": status,
+                            "entry_zone": entry_zone,
+                            "invalidate": invalidate,
+                            "catalyst": catalyst,
+                            "notes": notes,
+                        }
+                        ok, msg = upsert_watchlist(payload, row_id=row_id)
+                        if ok:
+                            st.success("Watchlist item saved.")
+                            st.rerun()
+                        else:
+                            st.error(f"Save failed: {msg}")
+                with e2:
+                    if st.button("Delete watchlist item", use_container_width=True):
+                        ok, msg = delete_watchlist(row_id)
+                        if ok:
+                            st.success("Watchlist item deleted.")
+                            st.rerun()
+                        else:
+                            st.error(f"Delete failed: {msg}")
 
 # =========================
 # Calendar
